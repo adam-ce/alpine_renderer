@@ -439,12 +439,12 @@ void Window::paint(QOpenGLFramebufferObject* framebuffer)
     m_decoration_buffer->bind_colour_texture(0, 0);
     f->glEnable(GL_BLEND);
     f->glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    f->glDisable(GL_FRAMEBUFFER_SRGB);
     m_screen_quad_geometry.draw();
 
     f->glDisable(GL_BLEND);
     f->glBlendFunc(GL_ONE, GL_ZERO);
     f->glDisable(GL_CULL_FACE);
-    f->glDisable(GL_FRAMEBUFFER_SRGB);
 
     m_timer->stop_timer("cpu_total");
     m_timer->stop_timer("gpu_total");
