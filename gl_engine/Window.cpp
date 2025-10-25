@@ -172,15 +172,15 @@ void Window::initialise_gpu()
     // ANOTHER IMPORTANT NOTE: RGB32f, RGB16f are not supported by OpenGL ES and/or WebGL
     m_gbuffer = std::make_unique<Framebuffer>(Framebuffer::DepthFormat::Float32,
         std::vector {
-            Framebuffer::ColourFormat::RGBA8, // Albedo
+            Framebuffer::ColourFormat::SRGBA8, // Albedo
             Framebuffer::ColourFormat::RGBA32F, // Position WCS and distance (distance is optional, but i use it directly for a little speed improvement)
             Framebuffer::ColourFormat::RG16UI, // Octahedron Normals
             Framebuffer::ColourFormat::RGBA8, // Discretized Encoded Depth for readback IMPORTANT: IF YOU MOVE THIS YOU HAVE TO ADAPT THE GET DEPTH FUNCTION
             // TextureDefinition { Framebuffer::ColourFormat::R32UI }, // VertexID
         });
 
-    m_atmospherebuffer = std::make_unique<Framebuffer>(Framebuffer::DepthFormat::None, std::vector { Framebuffer::ColourFormat::RGBA8 });
-    m_decoration_buffer = std::make_unique<Framebuffer>(Framebuffer::DepthFormat::None, std::vector { Framebuffer::ColourFormat::RGBA8 });
+    m_atmospherebuffer = std::make_unique<Framebuffer>(Framebuffer::DepthFormat::None, std::vector { Framebuffer::ColourFormat::SRGBA8 });
+    m_decoration_buffer = std::make_unique<Framebuffer>(Framebuffer::DepthFormat::None, std::vector { Framebuffer::ColourFormat::SRGBA8 });
     m_pickerbuffer = std::make_unique<Framebuffer>(Framebuffer::DepthFormat::Float32, std::vector { Framebuffer::ColourFormat::RGBA32F });
     f->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_gbuffer->depth_texture()->textureId(), 0);
 
@@ -262,6 +262,7 @@ void Window::paint(QOpenGLFramebufferObject* framebuffer)
 
     QOpenGLExtraFunctions *f = QOpenGLContext::currentContext()->extraFunctions();
 
+    f->glEnable(GL_FRAMEBUFFER_SRGB);
     f->glEnable(GL_CULL_FACE);
     f->glCullFace(GL_BACK);
 
@@ -443,6 +444,7 @@ void Window::paint(QOpenGLFramebufferObject* framebuffer)
     f->glDisable(GL_BLEND);
     f->glBlendFunc(GL_ONE, GL_ZERO);
     f->glDisable(GL_CULL_FACE);
+    f->glDisable(GL_FRAMEBUFFER_SRGB);
 
     m_timer->stop_timer("cpu_total");
     m_timer->stop_timer("gpu_total");

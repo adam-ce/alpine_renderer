@@ -43,6 +43,8 @@ QOpenGLTexture::TextureFormat internal_format_qt(Framebuffer::ColourFormat f)
         return QOpenGLTexture::TextureFormat::RGB8_UNorm;
     case Framebuffer::ColourFormat::RGBA8:
         return QOpenGLTexture::TextureFormat::RGBA8_UNorm;
+    case Framebuffer::ColourFormat::SRGBA8:
+        return QOpenGLTexture::TextureFormat::SRGB8_Alpha8;
     case Framebuffer::ColourFormat::RG16UI:
         return QOpenGLTexture::TextureFormat::RG16U;
     case Framebuffer::ColourFormat::Float32:
@@ -68,6 +70,8 @@ GLenum format(Framebuffer::ColourFormat f)
     case Framebuffer::ColourFormat::RGB8:
         return GL_RGB;
     case Framebuffer::ColourFormat::RGBA8:
+        return GL_RGBA;
+    case Framebuffer::ColourFormat::SRGBA8:
         return GL_RGBA;
     case Framebuffer::ColourFormat::RG16UI:
         return QOpenGLTexture::PixelFormat::RG_Integer;
@@ -114,6 +118,7 @@ GLenum type(Framebuffer::ColourFormat f)
     switch (f) {
     case Framebuffer::ColourFormat::R8:
     case Framebuffer::ColourFormat::RGBA8:
+    case Framebuffer::ColourFormat::SRGBA8:
     case Framebuffer::ColourFormat::RGB8:
         return GL_UNSIGNED_BYTE;
     case Framebuffer::ColourFormat::RG16UI:
@@ -196,8 +201,8 @@ void Framebuffer::recreate_texture(size_t index)
 
         // WARNING: If format and type not specifically defined in the following function it will crash for uint-textures
         // on OpenGL ES (Android). Might be a bug with the default of QOpenGLTexture on that platform.
-        m_colour_textures[index]->allocateStorage(
-            (QOpenGLTexture::PixelFormat)format(m_colour_definitions[index]), (QOpenGLTexture::PixelType)type(m_colour_definitions[index]));
+        m_colour_textures[index]->allocateStorage();
+        // (QOpenGLTexture::PixelFormat)format(m_colour_definitions[index]), (QOpenGLTexture::PixelType)type(m_colour_definitions[index]));
     }
 }
 
@@ -314,6 +319,7 @@ T Framebuffer::read_colour_attachment_pixel(unsigned int index, const glm::dvec2
         assert(false);
         return {};
     case Framebuffer::ColourFormat::RGBA8:
+    case Framebuffer::ColourFormat::SRGBA8:
         assert(sizeof(T) == 4);
         if (sizeof(T) != 4)
             return {};

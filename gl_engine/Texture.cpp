@@ -285,7 +285,7 @@ GLenum gl_engine::Texture::compressed_texture_format()
 #elif defined(__ANDROID__)
     return GL_COMPRESSED_RGB8_ETC2;
 #else
-    return GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+    return GL_COMPRESSED_SRGB_S3TC_DXT1_EXT;
 #endif
 }
 
