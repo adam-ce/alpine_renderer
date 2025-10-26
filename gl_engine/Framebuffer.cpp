@@ -43,16 +43,16 @@ QOpenGLTexture::TextureFormat internal_format_qt(Framebuffer::ColourFormat f)
         return QOpenGLTexture::TextureFormat::RGB8_UNorm;
     case Framebuffer::ColourFormat::RGBA8:
         return QOpenGLTexture::TextureFormat::RGBA8_UNorm;
-    case Framebuffer::ColourFormat::SRGBA8:
-        return QOpenGLTexture::TextureFormat::SRGB8_Alpha8;
+    // case Framebuffer::ColourFormat::SRGBA8:
+    // return QOpenGLTexture::TextureFormat::SRGB8_Alpha8;
     case Framebuffer::ColourFormat::RG16UI:
         return QOpenGLTexture::TextureFormat::RG16U;
-    case Framebuffer::ColourFormat::Float32:
-        return QOpenGLTexture::TextureFormat::R32F;
-    case Framebuffer::ColourFormat::RGB16F:
-        return QOpenGLTexture::TextureFormat::RGB16F;
-    case Framebuffer::ColourFormat::RGBA16F:
-        return QOpenGLTexture::TextureFormat::RGBA16F;
+    // case Framebuffer::ColourFormat::Float32:
+    // return QOpenGLTexture::TextureFormat::R32F;
+    // case Framebuffer::ColourFormat::RGB16F:
+    // return QOpenGLTexture::TextureFormat::RGB16F;
+    // case Framebuffer::ColourFormat::RGBA16F:
+    // return QOpenGLTexture::TextureFormat::RGBA16F;
     case Framebuffer::ColourFormat::R32UI:
         return QOpenGLTexture::TextureFormat::R32U;
     case Framebuffer::ColourFormat::RGBA32F:
@@ -71,16 +71,16 @@ GLenum format(Framebuffer::ColourFormat f)
         return GL_RGB;
     case Framebuffer::ColourFormat::RGBA8:
         return GL_RGBA;
-    case Framebuffer::ColourFormat::SRGBA8:
-        return GL_RGBA;
+    // case Framebuffer::ColourFormat::SRGBA8:
+    // return GL_RGBA;
     case Framebuffer::ColourFormat::RG16UI:
         return QOpenGLTexture::PixelFormat::RG_Integer;
-    case Framebuffer::ColourFormat::Float32: // reading Float32 is inefficient, see read_colour_attachment() for details.
-        return GL_RED;
-    case Framebuffer::ColourFormat::RGB16F:
-        return GL_RGB;
-    case Framebuffer::ColourFormat::RGBA16F:
-        return GL_RGBA;
+    // case Framebuffer::ColourFormat::Float32: // reading Float32 is inefficient, see read_colour_attachment() for details.
+    // return GL_RED;
+    // case Framebuffer::ColourFormat::RGB16F:
+    // return GL_RGB;
+    // case Framebuffer::ColourFormat::RGBA16F:
+    // return GL_RGBA;
     case Framebuffer::ColourFormat::R32UI:
         return GL_RED_INTEGER;
     case Framebuffer::ColourFormat::RGBA32F:
@@ -118,17 +118,17 @@ GLenum type(Framebuffer::ColourFormat f)
     switch (f) {
     case Framebuffer::ColourFormat::R8:
     case Framebuffer::ColourFormat::RGBA8:
-    case Framebuffer::ColourFormat::SRGBA8:
+    // case Framebuffer::ColourFormat::SRGBA8:
     case Framebuffer::ColourFormat::RGB8:
         return GL_UNSIGNED_BYTE;
     case Framebuffer::ColourFormat::RG16UI:
         return QOpenGLTexture::PixelType::UInt16;
-    case Framebuffer::ColourFormat::Float32:
+    // case Framebuffer::ColourFormat::Float32:
     case Framebuffer::ColourFormat::RGBA32F:
         return GL_FLOAT;
-    case Framebuffer::ColourFormat::RGB16F:
-    case Framebuffer::ColourFormat::RGBA16F:
-        return GL_HALF_FLOAT;
+    // case Framebuffer::ColourFormat::RGB16F:
+    // case Framebuffer::ColourFormat::RGBA16F:
+    // return GL_HALF_FLOAT;
     case Framebuffer::ColourFormat::R32UI:
         return GL_UNSIGNED_INT;
     }
@@ -164,8 +164,8 @@ QImage::Format qimage_format(Framebuffer::ColourFormat f)
         return QImage::Format_RGBA8888;
     case Framebuffer::ColourFormat::RGB8:
         return QImage::Format_RGB888;
-    case Framebuffer::ColourFormat::RGB16F:
-        return QImage::Format_RGB16;
+    // case Framebuffer::ColourFormat::RGB16F:
+    // return QImage::Format_RGB16;
     default:
          throw std::logic_error("unsupported, QImage does not support the color format of the texture");
     }
@@ -201,8 +201,8 @@ void Framebuffer::recreate_texture(size_t index)
 
         // WARNING: If format and type not specifically defined in the following function it will crash for uint-textures
         // on OpenGL ES (Android). Might be a bug with the default of QOpenGLTexture on that platform.
-        m_colour_textures[index]->allocateStorage();
-        // (QOpenGLTexture::PixelFormat)format(m_colour_definitions[index]), (QOpenGLTexture::PixelType)type(m_colour_definitions[index]));
+        m_colour_textures[index]->allocateStorage(
+            (QOpenGLTexture::PixelFormat)format(m_colour_definitions[index]), (QOpenGLTexture::PixelType)type(m_colour_definitions[index]));
     }
 }
 
@@ -309,9 +309,9 @@ T Framebuffer::read_colour_attachment_pixel(unsigned int index, const glm::dvec2
     case Framebuffer::ColourFormat::R8:
     case Framebuffer::ColourFormat::RGB8:
     case Framebuffer::ColourFormat::RG16UI: // unsupported on android emulator (and webassembly linux firefox?)
-    case Framebuffer::ColourFormat::Float32:
-    case Framebuffer::ColourFormat::RGB16F:
-    case Framebuffer::ColourFormat::RGBA16F:
+    // case Framebuffer::ColourFormat::Float32:
+    // case Framebuffer::ColourFormat::RGB16F:
+    // case Framebuffer::ColourFormat::RGBA16F:
     case Framebuffer::ColourFormat::R32UI: // fails on linux firefox
         // unsupported or untested.
         // you really should add a unit test if you move something down to the supported section
@@ -319,7 +319,7 @@ T Framebuffer::read_colour_attachment_pixel(unsigned int index, const glm::dvec2
         assert(false);
         return {};
     case Framebuffer::ColourFormat::RGBA8:
-    case Framebuffer::ColourFormat::SRGBA8:
+        // case Framebuffer::ColourFormat::SRGBA8:
         assert(sizeof(T) == 4);
         if (sizeof(T) != 4)
             return {};
