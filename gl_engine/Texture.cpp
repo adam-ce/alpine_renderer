@@ -274,16 +274,16 @@ GLenum gl_engine::Texture::compressed_texture_format()
         const ext = gl.getExtension("WEBGL_compressed_texture_etc");
         if (ext === null)
             return 0;
-        return ext.COMPRESSED_RGB8_ETC2;
+        return ext.COMPRESSED_SRGB8_ETC2;
     });
     // qDebug() << "gl_engine::Texture::compressed_texture_format: gl_texture_format from js: " << gl_texture_format;
     // clang-format on
     if (gl_texture_format == 0) {
-        gl_texture_format = GL_COMPRESSED_RGB_S3TC_DXT1_EXT; // not on mobile
+        gl_texture_format = GL_COMPRESSED_SRGB_S3TC_DXT1_EXT; // not on mobile
     }
     return gl_texture_format;
 #elif defined(__ANDROID__)
-    return GL_COMPRESSED_RGB8_ETC2;
+    return GL_COMPRESSED_SRGB8_ETC2;
 #else
     return GL_COMPRESSED_SRGB_S3TC_DXT1_EXT;
 #endif

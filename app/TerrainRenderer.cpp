@@ -138,7 +138,6 @@ QOpenGLFramebufferObject *TerrainRenderer::createFramebufferObject(const QSize &
     QOpenGLFramebufferObjectFormat format;
     format.setSamples(1);
     format.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
-    format.setInternalTextureFormat(GL_SRGB8_ALPHA8);
     return new QOpenGLFramebufferObject(size, format);
 }
 

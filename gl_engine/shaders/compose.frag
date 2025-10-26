@@ -260,4 +260,6 @@ void main() {
         }
     }
 
+    // srgb framebuffer support is patchy. encoding manually here.
+    out_Color = vec4(pow(out_Color.rgb, vec3(1.0/2.2)), out_Color.a);
 }
