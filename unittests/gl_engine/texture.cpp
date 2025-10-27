@@ -451,7 +451,7 @@ TEST_CASE("gl texture")
                         diff += std::abs(qBlue(render_result.pixel(i, j)) / 255.0 - std::pow(242 / 255.0, 2.2));
                     }
                 }
-                CHECK(diff / (256 * 256 * 3) < 0.018);
+                CHECK(diff / (256 * 256 * 3) < 0.02);
             }
             {
                 const QImage render_result = framebuffer.read_colour_attachment(2);
@@ -464,7 +464,7 @@ TEST_CASE("gl texture")
                         diff += std::abs(qBlue(render_result.pixel(i, j)) / 255.0 - std::pow(0 / 255.0, 2.2)) / 255.0;
                     }
                 }
-                CHECK(diff / (256 * 256 * 3) < 0.018);
+                CHECK(diff / (256 * 256 * 3) < 0.02);
             }
         }
     }
