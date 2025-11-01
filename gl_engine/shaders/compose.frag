@@ -180,6 +180,18 @@ void main() {
         highp vec4 material_light_response = conf.material_light_response;
         alpha = calculate_atmospheric_falloff(dist, -ray_direction.z, 300000.0, 600000.0);
 
+        if (pos_ws.x < 1.30107e+06)
+            alpha = 0.0;
+
+        if (pos_ws.y < 6.00446e+06)
+            alpha = 0.0;
+
+        if (pos_ws.x > 1.31703e+06)
+            alpha = 0;
+
+        if (pos_ws.y > 6.0199e+06)
+            alpha = 0.0;
+
 
         highp float shadow_term = 0.0;
         if (bool(conf.csm_enabled)) {
@@ -209,12 +221,12 @@ void main() {
         if (bool(conf.phong_enabled)) {
             shaded_color = calculate_illumination(shaded_color, origin, pos_ws, normal, conf.sun_light, conf.amb_light, conf.sun_light_dir.xyz, material_light_response, amb_occlusion, shadow_term);
         }
-        shaded_color = calculate_atmospheric_light(origin / 1000.0, ray_direction, dist / 1000.0, shaded_color, 10);
+        // shaded_color = calculate_atmospheric_light(origin / 1000.0, ray_direction, dist / 1000.0, shaded_color, 10);
         shaded_color = max(vec3(0.0), shaded_color);
     }
 
     // Blend with atmospheric background:
-    lowp vec3 atmoshperic_color = texture(texin_atmosphere, texcoords).rgb;
+    lowp vec3 atmoshperic_color = vec3(1);//texture(texin_atmosphere, texcoords).rgb;
     out_Color = vec4(mix(atmoshperic_color, shaded_color, alpha), 1.0);
 
     if (bool(conf.overlay_postshading_enabled) && conf.overlay_mode >= 100u) {

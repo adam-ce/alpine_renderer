@@ -150,6 +150,7 @@ std::optional<glm::vec2> OrbitInteraction::operation_centre() { return -m_operat
 void OrbitInteraction::start(const glm::vec2& position, const Definition& camera, AbstractDepthTester* depth_tester)
 {
     m_operation_centre = depth_tester->position(camera.to_ndc(position));
+    qDebug() << "hitpoint: " << m_operation_centre.x << m_operation_centre.y;
 
     auto degFromUp = glm::degrees(glm::acos(glm::dot(camera.z_axis(), glm::dvec3(0, 0, 1))));
     if (m_operation_centre.z > camera.position().z || degFromUp > 80.0) {

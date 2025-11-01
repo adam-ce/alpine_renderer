@@ -405,7 +405,7 @@ void Window::paint(QOpenGLFramebufferObject* framebuffer)
     // DRAW LABELS
     if (m_context->map_label_manager()) {
         m_timer->start_timer("labels");
-        m_context->map_label_manager()->draw(m_gbuffer.get(), m_camera, label_tile_set);
+        // m_context->map_label_manager()->draw(m_gbuffer.get(), m_camera, label_tile_set);
         m_timer->stop_timer("labels");
     }
 
