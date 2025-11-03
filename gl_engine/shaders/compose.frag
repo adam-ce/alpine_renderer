@@ -180,17 +180,87 @@ void main() {
         highp vec4 material_light_response = conf.material_light_response;
         alpha = calculate_atmospheric_falloff(dist, -ray_direction.z, 300000.0, 600000.0);
 
-        if (pos_ws.x < 1.30107e+06)
-            alpha = 0.0;
 
-        if (pos_ws.y < 6.00446e+06)
-            alpha = 0.0;
+        highp float distance = length(pos_ws.xy - vec2(1.32638e+06, 6.01127e+06));
+        highp float b0 = 5000;
+        highp float b1 = 12000;
+        highp float b2 = 23000;
+        highp float b3 = 29000;
+        highp vec3 c0 = vec3(0, 0, 0) / 255.0;
+        highp vec3 c1 = vec3(0, 51, 153) / 255.0;
+        highp vec3 c2 = vec3(51, 102, 204) / 255.0;
+        highp vec3 c3 = vec3(102, 153, 255)/ 255.0;
+        highp vec3 c4 = vec3(204, 300, 550)/ 255.0;
 
-        if (pos_ws.x > 1.31703e+06)
-            alpha = 0;
+        highp vec3 cmixf0 = vec3(204, 0, 0) / 255.0;
+        highp vec3 cmixf1 = vec3(255, 204, 0) / 255.0;
+        highp vec3 cmixf2 = vec3(5, 5, 5) / 255.0;
 
-        if (pos_ws.y > 6.0199e+06)
+        // // tile zoom level
+        // alpha = 1.0;
+        // albedo = c1;
+
+        // // integer zoom level
+        // if (distance < b1) {
+        //     alpha = 1.0;
+        //     albedo = c1;
+        // } else if (distance < b2) {
+        //     alpha = 1.0;
+        //     albedo = c2;
+        // } else {
+        //     alpha = 1.0;
+        //     albedo = c3;
+        // }
+
+        // // floating zoom
+        // if (distance < b1) {
+        //     alpha = 1.0;
+        //     highp float f = ((distance - b0) / (b1 - b0));
+        //     albedo = f * c1 + (1 - f) * c0;
+        // } else if (distance < b2) {
+        //     alpha = 1.0;
+        //     highp float f = ((distance - b1) / (b2 - b1));
+        //     albedo = f * c2 + (1 - f) * c1;
+        // } else {
+        //     alpha = 1.0;
+        //     highp float f = ((distance - b2) / (b3 - b2));
+        //     albedo = f * c3 + (1 - f) * c2;
+        // }
+
+        // // mixing cooeficients
+        // if (distance < b1) {
+        //     alpha = 1.0;
+        //     highp float f = ((distance - b0) / (b1 - b0));
+        //     albedo = f * cmixf0 + (1-f) * cmixf1;
+        // } else if (distance < b2) {
+        //     alpha = 1.0;
+        //     highp float f = ((distance - b1) / (b2 - b1));
+        //     albedo = f * cmixf0 + (1-f) * cmixf1;
+        // } else {
+        //     alpha = 1.0;
+        //     highp float f = ((distance - b2) / (b3 - b2));
+        //     albedo = f * cmixf0 + (1-f) * cmixf1;
+        // }
+
+        // mixing 2
+        if (distance < b1) {
+            alpha = 1.0;
+            highp float f = ((distance - b0) / (b1 - b0));
+            albedo = f * c1 + (1 - f) * cmixf2;
+        } else if (distance < b2) {
+            alpha = 1.0;
+            highp float f = ((distance - b1) / (b2 - b1));
+            albedo = f * c2 + (1 - f) * cmixf2;
+        } else {
+            alpha = 1.0;
+            highp float f = ((distance - b2) / (b3 - b2));
+            albedo = f * c3 + (1 - f) * cmixf2;
+        }
+
+        if (pos_ws.x < 1.30107e+06 || pos_ws.y < 6.00446e+06 || pos_ws.x > 1.31703e+06 || pos_ws.y > 6.0199e+06) {
             alpha = 0.0;
+            albedo = vec3(0.7, 0.05, 0.05);
+        }
 
 
         highp float shadow_term = 0.0;
