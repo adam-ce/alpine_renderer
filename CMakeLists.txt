@@ -31,7 +31,7 @@ option(ALP_WEBGPU_ENGINE "include the webgpu engine in the buildsystem" ${ALP_WE
 option(ALP_WEBGPU_APP "include the webgpu app in the buildsystem" ${ALP_WEBGPU_DEFAULT})
 option(ALP_PLAIN_RENDERER "include the plain renderer in the buildsystem" OFF)
 set(ALP_PLAIN_WGPU_RENDERER_DEFAULT OFF)
-if (ANDROID AND ALP_WEBGPU_ENGINE)
+if ((ANDROID OR (UNIX AND NOT APPLE AND NOT EMSCRIPTEN)) AND ALP_WEBGPU_ENGINE)
     set(ALP_PLAIN_WGPU_RENDERER_DEFAULT ON)
 endif()
 option(ALP_PLAIN_WGPU_RENDERER "include the plain WebGPU renderer in the buildsystem" ${ALP_PLAIN_WGPU_RENDERER_DEFAULT})

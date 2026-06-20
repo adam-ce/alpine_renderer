@@ -18,6 +18,7 @@
 
 #include "Window.h"
 
+#include "VulkanPresentation.h"
 #include "nucleus/tile/drawing.h"
 #include "webgpu/base/RenderResourceRegistry.h"
 #include "webgpu/base/raii/RenderPassEncoder.h"
@@ -27,27 +28,16 @@
 #include <QCloseEvent>
 #include <QDebug>
 #include <QExposeEvent>
-#include <QJniEnvironment>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QResizeEvent>
 #include <QTouchEvent>
+#include <QVersionNumber>
 #include <QWheelEvent>
 #include <algorithm>
-#include <android/native_window.h>
-#include <android/native_window_jni.h>
 #include <cmath>
 
 namespace {
-
-void log_jni_exception(JNIEnv* env, const char* context)
-{
-    if (!env->ExceptionCheck())
-        return;
-    qWarning() << context;
-    env->ExceptionDescribe();
-    env->ExceptionClear();
-}
 
 void webgpu_device_error_callback(
     [[maybe_unused]] const WGPUDevice* device, WGPUErrorType type, WGPUStringView message, [[maybe_unused]] void* userdata1, [[maybe_unused]] void* userdata2)
@@ -74,6 +64,7 @@ Window::Window(std::shared_ptr<webgpu_engine::Context> context)
     setSurfaceType(QSurface::VulkanSurface);
     resize(1280, 720);
 
+    m_vulkan_instance.setApiVersion(QVersionNumber(1, 1));
     if (!m_vulkan_instance.create())
         qFatal("Could not create Qt Vulkan instance");
     setVulkanInstance(&m_vulkan_instance);
@@ -92,6 +83,7 @@ void Window::initialise_gpu()
 
     create_webgpu_context();
     m_context->set_webgpu_ctx(m_webgpu_context);
+    configure_presentation(pixel_size());
 
     m_context->shared_config().m_atmosphere_enabled = false;
     m_context->shared_config().m_clouds_enabled = false;
@@ -102,12 +94,11 @@ void Window::initialise_gpu()
     emit initialisation_started();
 
     create_buffers();
-    configure_surface(pixel_size());
     m_context->webgpu_ctx().resource_registry().recreate_all(m_device);
     create_bind_groups();
     create_compose_pipeline();
 
-    resize_framebuffer(pixel_size());
+    resize_framebuffer(m_surface_size);
 
     m_initialized = true;
     update_camera(m_camera);
@@ -181,8 +172,8 @@ void Window::resizeEvent(QResizeEvent* event)
     emit resized(logical_size());
     if (!m_initialized)
         return;
-    configure_surface(pixel_size());
-    resize_framebuffer(pixel_size());
+    configure_presentation(pixel_size());
+    resize_framebuffer(m_surface_size);
     request_render();
 }
 
@@ -223,109 +214,6 @@ glm::uvec2 Window::pixel_size() const
     };
 }
 
-ANativeWindow* Window::android_native_window() const
-{
-    QJniEnvironment jni;
-    JNIEnv* env = jni.jniEnv();
-    jobject qt_window = reinterpret_cast<jobject>(winId());
-    if (!qt_window)
-        return nullptr;
-
-    jclass qt_window_class = env->GetObjectClass(qt_window);
-    log_jni_exception(env, "Could not get QtWindow class");
-    if (!qt_window_class)
-        return nullptr;
-
-    jfieldID surface_container_field = env->GetFieldID(qt_window_class, "m_surfaceContainer", "Landroid/view/View;");
-    log_jni_exception(env, "Could not get QtWindow.m_surfaceContainer");
-    if (!surface_container_field) {
-        env->DeleteLocalRef(qt_window_class);
-        return nullptr;
-    }
-
-    jobject surface_container = env->GetObjectField(qt_window, surface_container_field);
-    log_jni_exception(env, "Could not get QtWindow surface container");
-    env->DeleteLocalRef(qt_window_class);
-    if (!surface_container)
-        return nullptr;
-
-    jclass surface_view_class = env->FindClass("android/view/SurfaceView");
-    log_jni_exception(env, "Could not find android.view.SurfaceView");
-    if (!surface_view_class) {
-        env->DeleteLocalRef(surface_container);
-        return nullptr;
-    }
-
-    if (!env->IsInstanceOf(surface_container, surface_view_class)) {
-        qWarning() << "Qt Android surface container is not a SurfaceView";
-        env->DeleteLocalRef(surface_view_class);
-        env->DeleteLocalRef(surface_container);
-        return nullptr;
-    }
-
-    jmethodID get_holder_method = env->GetMethodID(surface_view_class, "getHolder", "()Landroid/view/SurfaceHolder;");
-    log_jni_exception(env, "Could not get SurfaceView.getHolder");
-    env->DeleteLocalRef(surface_view_class);
-    if (!get_holder_method) {
-        env->DeleteLocalRef(surface_container);
-        return nullptr;
-    }
-
-    jobject holder = env->CallObjectMethod(surface_container, get_holder_method);
-    log_jni_exception(env, "Could not call SurfaceView.getHolder");
-    env->DeleteLocalRef(surface_container);
-    if (!holder)
-        return nullptr;
-
-    jclass holder_class = env->GetObjectClass(holder);
-    log_jni_exception(env, "Could not get SurfaceHolder class");
-    if (!holder_class) {
-        env->DeleteLocalRef(holder);
-        return nullptr;
-    }
-
-    jmethodID get_surface_method = env->GetMethodID(holder_class, "getSurface", "()Landroid/view/Surface;");
-    log_jni_exception(env, "Could not get SurfaceHolder.getSurface");
-    env->DeleteLocalRef(holder_class);
-    if (!get_surface_method) {
-        env->DeleteLocalRef(holder);
-        return nullptr;
-    }
-
-    jobject surface = env->CallObjectMethod(holder, get_surface_method);
-    log_jni_exception(env, "Could not call SurfaceHolder.getSurface");
-    env->DeleteLocalRef(holder);
-    if (!surface)
-        return nullptr;
-
-    ANativeWindow* native_window = ANativeWindow_fromSurface(env, surface);
-    env->DeleteLocalRef(surface);
-    return native_window;
-}
-
-bool Window::create_webgpu_surface()
-{
-    const VkSurfaceKHR qt_surface = QVulkanInstance::surfaceForWindow(this);
-    if (qt_surface == VK_NULL_HANDLE)
-        qWarning() << "Qt did not create a Vulkan surface for the window";
-
-    m_native_window = android_native_window();
-    if (!m_native_window)
-        return false;
-
-    WGPUSurfaceSourceAndroidNativeWindow android_window_desc {};
-    android_window_desc.chain.next = nullptr;
-    android_window_desc.chain.sType = WGPUSType_SurfaceSourceAndroidNativeWindow;
-    android_window_desc.window = m_native_window;
-
-    WGPUSurfaceDescriptor surface_desc {};
-    surface_desc.nextInChain = &android_window_desc.chain;
-    surface_desc.label = WGPUStringView { .data = "Qt Android surface", .length = WGPU_STRLEN };
-
-    m_surface = wgpuInstanceCreateSurface(m_instance, &surface_desc);
-    return m_surface != nullptr;
-}
-
 void Window::create_webgpu_context()
 {
     WGPUInstanceFeatureName timed_wait_feature = WGPUInstanceFeatureName_TimedWaitAny;
@@ -336,13 +224,9 @@ void Window::create_webgpu_context()
     if (!m_instance)
         qFatal("Could not create WebGPU instance");
 
-    if (!create_webgpu_surface())
-        qFatal("Could not create WebGPU surface from Qt Android window");
-
     WGPURequestAdapterOptions adapter_opts {};
     adapter_opts.powerPreference = WGPUPowerPreference_HighPerformance;
     adapter_opts.backendType = WGPUBackendType_Vulkan;
-    adapter_opts.compatibleSurface = m_surface;
     m_adapter = webgpu::requestAdapterSync(m_instance, adapter_opts);
     if (!m_adapter)
         qFatal("Could not get Vulkan WebGPU adapter");
@@ -395,40 +279,23 @@ void Window::create_webgpu_context()
     if (!m_queue)
         qFatal("Could not get WebGPU queue");
 
-    m_webgpu_context.init(m_instance, m_device, m_adapter, m_surface, m_queue);
+    m_webgpu_context.init(m_instance, m_device, m_adapter, nullptr, m_queue);
 }
 
-void Window::configure_surface(const glm::uvec2& size)
+void Window::configure_presentation(const glm::uvec2& size)
 {
     if (size == m_surface_size)
         return;
 
-    WGPUSurfaceCapabilities surface_capabilities {};
-    wgpuSurfaceGetCapabilities(m_surface, m_adapter, &surface_capabilities);
-    if (surface_capabilities.formatCount < 1)
-        qFatal("WebGPU surface does not report any supported formats");
-
-    m_surface_texture_format = surface_capabilities.formats[0];
-    for (size_t i = 0; i < surface_capabilities.formatCount; ++i) {
-        if (surface_capabilities.formats[i] == WGPUTextureFormat_BGRA8Unorm || surface_capabilities.formats[i] == WGPUTextureFormat_RGBA8Unorm) {
-            m_surface_texture_format = surface_capabilities.formats[i];
-            break;
-        }
+    if (!m_presentation) {
+        m_presentation = std::make_unique<VulkanPresentation>(m_vulkan_instance, *this);
+        m_presentation->initialize(m_adapter, m_device, size);
+    } else {
+        m_presentation->resize(size);
     }
+    m_surface_size = m_presentation->size();
+    m_surface_texture_format = m_presentation->texture_format();
     m_webgpu_context.set_surface_texture_format(m_surface_texture_format);
-
-    WGPUSurfaceConfiguration config {};
-    config.width = size.x;
-    config.height = size.y;
-    config.format = m_surface_texture_format;
-    config.usage = WGPUTextureUsage_RenderAttachment;
-    config.device = m_device;
-    config.presentMode = m_surface_present_mode;
-    config.alphaMode = WGPUCompositeAlphaMode_Auto;
-    wgpuSurfaceConfigure(m_surface, &config);
-    wgpuSurfaceCapabilitiesFreeMembers(surface_capabilities);
-
-    m_surface_size = size;
 }
 
 void Window::create_buffers()
@@ -517,25 +384,6 @@ void Window::render()
     if (!m_initialized || m_destroyed || !isExposed())
         return;
 
-    WGPUSurfaceTexture surface_texture {};
-    wgpuSurfaceGetCurrentTexture(m_surface, &surface_texture);
-    if (surface_texture.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal
-        && surface_texture.status != WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal) {
-        qWarning() << "Could not get current WebGPU surface texture:" << surface_texture.status;
-        return;
-    }
-
-    WGPUTextureViewDescriptor view_desc {};
-    view_desc.label = WGPUStringView { .data = "surface texture view", .length = WGPU_STRLEN };
-    view_desc.format = wgpuTextureGetFormat(surface_texture.texture);
-    view_desc.dimension = WGPUTextureViewDimension_2D;
-    view_desc.mipLevelCount = 1;
-    view_desc.arrayLayerCount = 1;
-    view_desc.aspect = WGPUTextureAspect_All;
-    WGPUTextureView surface_texture_view = wgpuTextureCreateView(surface_texture.texture, &view_desc);
-    if (!surface_texture_view)
-        qFatal("Cannot create surface texture view");
-
     WGPUCommandEncoderDescriptor encoder_desc {};
     encoder_desc.label = WGPUStringView { .data = "plain_wgpu_renderer encoder", .length = WGPU_STRLEN };
     WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(m_device, &encoder_desc);
@@ -555,14 +403,13 @@ void Window::render()
         m_context->tile_mesh_renderer()->draw(render_pass->handle(), m_camera, culled_draw_list);
     }
 
+    m_presentation->begin_dawn_access();
     {
-        webgpu::raii::RenderPassEncoder render_pass(encoder, surface_texture_view, nullptr);
+        webgpu::raii::RenderPassEncoder render_pass(encoder, m_presentation->render_target_view(), nullptr);
         wgpuRenderPassEncoderSetPipeline(render_pass.handle(), m_compose_pipeline->pipeline().handle());
         wgpuRenderPassEncoderSetBindGroup(render_pass.handle(), 0, m_compose_bind_group->handle(), 0, nullptr);
         wgpuRenderPassEncoderDraw(render_pass.handle(), 3, 1, 0, 0);
     }
-
-    wgpuTextureViewRelease(surface_texture_view);
 
     WGPUCommandBufferDescriptor command_desc {};
     command_desc.label = WGPUStringView { .data = "plain_wgpu_renderer command buffer", .length = WGPU_STRLEN };
@@ -570,31 +417,24 @@ void Window::render()
     wgpuCommandEncoderRelease(encoder);
     wgpuQueueSubmit(m_queue, 1, &command);
     wgpuCommandBufferRelease(command);
-    wgpuSurfacePresent(m_surface);
+    m_presentation->end_dawn_access_and_present();
     wgpuDeviceTick(m_device);
 }
 
 void Window::release_webgpu_context()
 {
-    if (m_surface)
-        wgpuSurfaceUnconfigure(m_surface);
+    m_presentation.reset();
     if (m_queue)
         wgpuQueueRelease(m_queue);
-    if (m_surface)
-        wgpuSurfaceRelease(m_surface);
     if (m_device)
         wgpuDeviceRelease(m_device);
     if (m_adapter)
         wgpuAdapterRelease(m_adapter);
     if (m_instance)
         wgpuInstanceRelease(m_instance);
-    if (m_native_window)
-        ANativeWindow_release(m_native_window);
 
     m_queue = nullptr;
-    m_surface = nullptr;
     m_device = nullptr;
     m_adapter = nullptr;
     m_instance = nullptr;
-    m_native_window = nullptr;
 }

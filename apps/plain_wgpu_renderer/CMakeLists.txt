@@ -19,16 +19,18 @@
 project(alpine-renderer-plain_wgpu_renderer LANGUAGES CXX)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Network)
+find_package(Vulkan REQUIRED)
 
 qt_add_executable(plain_wgpu_renderer
     main.cpp
     Window.h Window.cpp
+    VulkanPresentation.h VulkanPresentation.cpp
 )
 set_target_properties(plain_wgpu_renderer PROPERTIES
     WIN32_EXECUTABLE TRUE
     MACOSX_BUNDLE TRUE
 )
-target_link_libraries(plain_wgpu_renderer PUBLIC webgpu_engine Qt::Core Qt::Gui Qt::Network)
+target_link_libraries(plain_wgpu_renderer PUBLIC webgpu_engine Qt::Core Qt::Gui Qt::Network Vulkan::Vulkan)
 target_include_directories(plain_wgpu_renderer PRIVATE .)
 
 alp_configure_target(plain_wgpu_renderer)
@@ -45,7 +47,9 @@ set_target_properties(plain_wgpu_renderer PROPERTIES
     QT_ANDROID_VERSION_CODE "${ALP_VERSION_INTEGER}"
 )
 
-add_android_openssl_libraries(plain_wgpu_renderer)
+if (ANDROID)
+    add_android_openssl_libraries(plain_wgpu_renderer)
+endif()
 
 install(TARGETS plain_wgpu_renderer
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

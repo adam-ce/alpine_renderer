@@ -36,7 +36,7 @@
 #include <memory>
 #include <webgpu/webgpu.h>
 
-struct ANativeWindow;
+class VulkanPresentation;
 
 class Window : public QWindow, public nucleus::camera::AbstractDepthTester {
     Q_OBJECT
@@ -79,11 +79,9 @@ protected:
 private:
     [[nodiscard]] glm::uvec2 logical_size() const;
     [[nodiscard]] glm::uvec2 pixel_size() const;
-    [[nodiscard]] ANativeWindow* android_native_window() const;
 
-    bool create_webgpu_surface();
     void create_webgpu_context();
-    void configure_surface(const glm::uvec2& size);
+    void configure_presentation(const glm::uvec2& size);
     void create_buffers();
     void create_bind_groups();
     void create_compose_pipeline();
@@ -96,15 +94,13 @@ private:
     webgpu::Context m_webgpu_context;
     QVulkanInstance m_vulkan_instance;
     QTimer m_render_timer;
+    std::unique_ptr<VulkanPresentation> m_presentation;
 
     WGPUInstance m_instance = nullptr;
     WGPUAdapter m_adapter = nullptr;
     WGPUDevice m_device = nullptr;
     WGPUQueue m_queue = nullptr;
-    WGPUSurface m_surface = nullptr;
     WGPUTextureFormat m_surface_texture_format = WGPUTextureFormat_BGRA8Unorm;
-    WGPUPresentMode m_surface_present_mode = WGPUPresentMode_Fifo;
-    ANativeWindow* m_native_window = nullptr;
 
     std::unique_ptr<webgpu::Buffer<webgpu_engine::uboSharedConfig>> m_shared_config_ubo;
     std::unique_ptr<webgpu::Buffer<webgpu_engine::uboCameraConfig>> m_camera_config_ubo;
