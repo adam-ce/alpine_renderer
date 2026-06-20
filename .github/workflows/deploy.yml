@@ -19,7 +19,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        qtarch: [android_arm64_v8a, android_armv7]
+        include:
+          - qtarch: android_arm64_v8a
+            android_abi: arm64-v8a
+          - qtarch: android_armv7
+            android_abi: armeabi-v7a
 
     steps:
     - name: Install dependencies
@@ -36,6 +40,15 @@ jobs:
 
     - name: Load CI versions
       run: cat .github/ci-versions.env >> "$GITHUB_ENV"
+
+    - name: Cache Android WebGPU dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          extern/dawn/install/Release/${{ matrix.android_abi }}
+        key: android-webgpu-deps-${{ runner.os }}-${{ env.QT_VERSION }}-${{ matrix.qtarch }}-dawn-20260420.230544-${{ hashFiles('webgpu/base/CMakeLists.txt', 'misc/scripts/fetch_dawn_native.py') }}
+        restore-keys: |
+          android-webgpu-deps-${{ runner.os }}-${{ env.QT_VERSION }}-${{ matrix.qtarch }}-dawn-20260420.230544-
 
     - name: Install Qt native version (the one provided by aqt doesn't seem to work)
       uses: jurplel/install-qt-action@v4
@@ -77,6 +90,7 @@ jobs:
 
         ANDROID_BUILD_DIR_ARR=(
           "$BUILD_DIR/app/android-build-alpineapp"
+          "$BUILD_DIR/apps/plain_wgpu_renderer/android-build-plain_wgpu_renderer"
           "$BUILD_DIR/plain_renderer/android-build-plain_renderer"
           "$BUILD_DIR/alp_external/radix/unittests/android-build-unittests_radix"
           "$BUILD_DIR/unittests/gl_engine/android-build-unittests_gl_engine"
@@ -85,6 +99,7 @@ jobs:
 
         DEPLOYMENT_SETTINGS_ARR=(
           "$BUILD_DIR/app/android-alpineapp-deployment-settings.json"
+          "$BUILD_DIR/apps/plain_wgpu_renderer/android-plain_wgpu_renderer-deployment-settings.json"
           "$BUILD_DIR/plain_renderer/android-plain_renderer-deployment-settings.json"
           "$BUILD_DIR/alp_external/radix/unittests/android-unittests_radix-deployment-settings.json"
           "$BUILD_DIR/unittests/gl_engine/android-unittests_gl_engine-deployment-settings.json"
@@ -151,6 +166,9 @@ jobs:
           -DQT_HOST_PATH="${QT_HOST_ROOT_DIR}" \
           -DCMAKE_BUILD_TYPE=Release \
           -DALP_ENABLE_ASSERTS=ON \
+          -DALP_WEBGPU_ENGINE=ON \
+          -DALP_WEBGPU_APP=OFF \
+          -DALP_PLAIN_WGPU_RENDERER=ON \
           -DQT_ANDROID_SIGN_APK=ON \
           -DQT_USE_TARGET_ANDROID_BUILD_DIR:BOOL=ON \
           -S "${{ github.workspace }}"
@@ -163,6 +181,7 @@ jobs:
         mkdir -p "$INSTALL_DIR"
         find "$BUILD_DIR" -iname "*.apk"
         find "$BUILD_DIR" -type f -iname "*.apk" ! -name "android-build-*.apk" -exec cp {} "$INSTALL_DIR" \;
+        test -n "$(find "$INSTALL_DIR" -maxdepth 1 -type f -name 'plain_wgpu_renderer*.apk' -print -quit)"
 
     - name: Create artifact
       uses: actions/upload-artifact@v5

@@ -43,29 +43,93 @@ def find_package_root(root):
     fail("DawnConfig.cmake was not found in the native Dawn package")
 
 
+def find_asset(assets, suffix=None, prefix=None):
+    matches = []
+    for asset in assets:
+        name = asset.get("name", "")
+        if suffix is not None and not name.endswith(suffix):
+            continue
+        if prefix is not None and not name.startswith(prefix):
+            continue
+        matches.append(asset)
+    if not matches:
+        expected = f"*{suffix}" if suffix else f"{prefix}*"
+        fail(f"No Dawn release asset matching {expected}")
+    if len(matches) > 1:
+        expected = f"*{suffix}" if suffix else f"{prefix}*"
+        fail(f"Multiple Dawn release assets match {expected}")
+    return matches[0]
+
+
+def install_android_package(assets, version, install_dir, android_abi):
+    if not android_abi:
+        fail("--android-abi is required when --platform android is used")
+
+    headers_asset = find_asset(assets, prefix="dawn-headers-")
+    android_asset = find_asset(assets, prefix="dawn-android-")
+
+    tmp_dir = tempfile.mkdtemp(prefix="fetchdawn_android_")
+    headers_archive = os.path.join(tmp_dir, headers_asset["name"])
+    android_archive = os.path.join(tmp_dir, android_asset["name"])
+
+    try:
+        download(headers_asset["browser_download_url"], headers_archive)
+        download(android_asset["browser_download_url"], android_archive)
+        safe_extract(headers_archive, tmp_dir)
+        safe_extract(android_archive, tmp_dir)
+
+        headers_root = os.path.join(tmp_dir, "dawn-headers")
+        android_root = next(
+            (
+                os.path.join(tmp_dir, entry)
+                for entry in os.listdir(tmp_dir)
+                if entry.startswith("dawn-android-") and os.path.isdir(os.path.join(tmp_dir, entry))
+            ),
+            None,
+        )
+        if not os.path.isdir(headers_root):
+            fail("dawn-headers directory was not found in Dawn headers package")
+        if not android_root:
+            fail("dawn-android directory was not found in Dawn Android package")
+
+        abi_library = os.path.join(android_root, android_abi, "libwebgpu_dawn.a")
+        if not os.path.exists(abi_library):
+            fail(f"Dawn Android library was not found for ABI {android_abi}")
+
+        if os.path.exists(install_dir):
+            log(f"Removing existing Dawn Android package: {install_dir}")
+            shutil.rmtree(install_dir)
+        os.makedirs(os.path.dirname(install_dir), exist_ok=True)
+        log(f"Installing Dawn Android package for {android_abi} to {install_dir}")
+        shutil.move(headers_root, install_dir)
+        os.makedirs(os.path.join(install_dir, "lib"), exist_ok=True)
+        shutil.copy2(abi_library, os.path.join(install_dir, "lib", "libwebgpu_dawn.a"))
+        log(f"Successfully fetched Dawn Android package v{version} for {android_abi}")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fetch a prebuilt native Dawn package")
     parser.add_argument("--extern-dir", required=True, help="External dependencies directory")
     parser.add_argument("--dawn-version", required=True, help="Dawn version to fetch")
     parser.add_argument("--build-type", required=True, choices=["Debug", "Release"], help="Dawn package configuration")
     parser.add_argument("--platform", default="ubuntu-latest", help="Dawn release platform asset name")
+    parser.add_argument("--android-abi", default="", help="Android ABI to install when --platform android is used")
     args = parser.parse_args()
 
     extern_dir = os.path.abspath(args.extern_dir)
     dawn_dir = os.path.join(extern_dir, "dawn")
     install_dir = os.path.join(dawn_dir, "install", args.build_type)
+    assets = release_assets(args.dawn_version)
+
+    if args.platform == "android":
+        install_dir = os.path.join(install_dir, args.android_abi)
+        install_android_package(assets, args.dawn_version, install_dir, args.android_abi)
+        return 0
+
     asset_suffix = f"-{args.platform}-{args.build_type}.tar.gz"
-
-    matches = [
-        asset for asset in release_assets(args.dawn_version)
-        if asset.get("name", "").endswith(asset_suffix)
-    ]
-    if not matches:
-        fail(f"No Dawn release asset matching *{asset_suffix} for v{args.dawn_version}")
-    if len(matches) > 1:
-        fail(f"Multiple Dawn release assets match *{asset_suffix} for v{args.dawn_version}")
-
-    asset = matches[0]
+    asset = find_asset(assets, suffix=asset_suffix)
     tmp_dir = tempfile.mkdtemp(prefix="fetchdawn_native_")
     archive_path = os.path.join(tmp_dir, asset["name"])
 

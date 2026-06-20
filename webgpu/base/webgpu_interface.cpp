@@ -84,6 +84,7 @@
 #include <UIKit/UIKit.h>
 #endif
 
+#if !defined(__ANDROID__)
 #include <SDL2/SDL_syswm.h>
 
 WGPUSurface SDL_GetWGPUSurface(WGPUInstance instance, SDL_Window* window)
@@ -222,6 +223,7 @@ WGPUSurface SDL_GetWGPUSurface(WGPUInstance instance, SDL_Window* window)
 #error "Unsupported WGPU_TARGET"
 #endif
 }
+#endif
 
 namespace webgpu {
 

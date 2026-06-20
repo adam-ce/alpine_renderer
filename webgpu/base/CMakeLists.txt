@@ -66,7 +66,6 @@ add_library(webgpu STATIC ${SOURCES})
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 function(alp_find_local_dawn_package out_var)
-    set(ALP_DAWN_INSTALL_DIR "${ALP_DAWN_DIR}/install/${ALP_DAWN_CONFIG}")
     set(ALP_DAWN_VERSION_FILE "${ALP_DAWN_INSTALL_DIR}/.alp_dawn_version")
     if (NOT EXISTS "${ALP_DAWN_VERSION_FILE}")
         set(${out_var} "" PARENT_SCOPE)
@@ -77,6 +76,15 @@ function(alp_find_local_dawn_package out_var)
     string(STRIP "${ALP_DAWN_INSTALLED_VERSION}" ALP_DAWN_INSTALLED_VERSION)
     if (NOT ALP_DAWN_INSTALLED_VERSION STREQUAL ALP_DAWN_VERSION)
         set(${out_var} "" PARENT_SCOPE)
+        return()
+    endif()
+
+    if (ANDROID)
+        if (EXISTS "${ALP_DAWN_INSTALL_DIR}/include/dawn/webgpu.h" AND EXISTS "${ALP_DAWN_INSTALL_DIR}/lib/libwebgpu_dawn.a")
+            set(${out_var} "${ALP_DAWN_INSTALL_DIR}" PARENT_SCOPE)
+        else()
+            set(${out_var} "" PARENT_SCOPE)
+        endif()
         return()
     endif()
 
@@ -91,12 +99,18 @@ function(alp_find_local_dawn_package out_var)
 endfunction()
 
 function(alp_mark_local_dawn_package)
-    foreach(ALP_DAWN_MARK_CONFIG Debug Release)
-        set(ALP_DAWN_MARK_DIR "${ALP_DAWN_DIR}/install/${ALP_DAWN_MARK_CONFIG}")
-        if (EXISTS "${ALP_DAWN_MARK_DIR}")
-            file(WRITE "${ALP_DAWN_MARK_DIR}/.alp_dawn_version" "${ALP_DAWN_VERSION}\n")
+    if (ANDROID)
+        if (EXISTS "${ALP_DAWN_INSTALL_DIR}")
+            file(WRITE "${ALP_DAWN_INSTALL_DIR}/.alp_dawn_version" "${ALP_DAWN_VERSION}\n")
         endif()
-    endforeach()
+    else()
+        foreach(ALP_DAWN_MARK_CONFIG Debug Release)
+            set(ALP_DAWN_MARK_DIR "${ALP_DAWN_DIR}/install/${ALP_DAWN_MARK_CONFIG}")
+            if (EXISTS "${ALP_DAWN_MARK_DIR}")
+                file(WRITE "${ALP_DAWN_MARK_DIR}/.alp_dawn_version" "${ALP_DAWN_VERSION}\n")
+            endif()
+        endforeach()
+    endif()
 endfunction()
 
 if (EMSCRIPTEN)
@@ -141,12 +155,18 @@ else()
         set(ALP_DAWN_CONFIG "Release")
     endif()
 
-    if (WIN32)
+    if (ANDROID)
+        set(ALP_DAWN_NATIVE_PLATFORM "android")
+        set(ALP_DAWN_INSTALL_DIR "${ALP_DAWN_DIR}/install/${ALP_DAWN_CONFIG}/${CMAKE_ANDROID_ARCH_ABI}")
+    elseif (WIN32)
         set(ALP_DAWN_NATIVE_PLATFORM "windows-latest")
+        set(ALP_DAWN_INSTALL_DIR "${ALP_DAWN_DIR}/install/${ALP_DAWN_CONFIG}")
     elseif(APPLE)
         set(ALP_DAWN_NATIVE_PLATFORM "macos-latest")
+        set(ALP_DAWN_INSTALL_DIR "${ALP_DAWN_DIR}/install/${ALP_DAWN_CONFIG}")
     else()
         set(ALP_DAWN_NATIVE_PLATFORM "ubuntu-latest")
+        set(ALP_DAWN_INSTALL_DIR "${ALP_DAWN_DIR}/install/${ALP_DAWN_CONFIG}")
     endif()
 
     alp_find_local_dawn_package(ALP_DAWN_CMAKE_PACKAGE)
@@ -159,11 +179,16 @@ else()
                 --extern-dir "${ALP_EXTERN_DIR}"
                 --build-type "${ALP_DAWN_CONFIG}"
                 --platform "${ALP_DAWN_NATIVE_PLATFORM}"
+                --android-abi "${CMAKE_ANDROID_ARCH_ABI}"
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
             RESULT_VARIABLE DAWN_FETCH_RESULT
         )
 
         if (NOT DAWN_FETCH_RESULT EQUAL 0)
+            if (ANDROID)
+                message(FATAL_ERROR "Fetching Android Dawn package failed.")
+            endif()
+
             message(STATUS "Fetching native Dawn package failed - running install_dawn.py...")
 
             if (NOT DEFINED ALP_CMAKE_EXECUTABLE)
@@ -203,54 +228,77 @@ else()
         message(FATAL_ERROR "Dawn ${ALP_DAWN_VERSION} was not found in ${ALP_DAWN_DIR}/install/${ALP_DAWN_CONFIG}.")
     endif()
 
-    set(Dawn_DIR "${ALP_DAWN_CMAKE_PACKAGE}")
-    find_package(Dawn REQUIRED CONFIG PATHS "${ALP_DAWN_CMAKE_PACKAGE}" NO_DEFAULT_PATH)
-    target_link_libraries(webgpu PUBLIC dawn::webgpu_dawn)
-
-    # Ensure SDL is installed
-    if (NOT EXISTS "${ALP_SDL_INSTALL_DIR}")
-        message(STATUS "SDL not found - running install_sdl.py...")
-
-        if (NOT DEFINED ALP_CMAKE_EXECUTABLE)
-            find_program(ALP_CMAKE_EXECUTABLE cmake)
-            if (NOT ALP_CMAKE_EXECUTABLE)
-                message(FATAL_ERROR "cmake not found")
-            endif()
-        endif()
-
-        if (NOT DEFINED ALP_NINJA_EXECUTABLE)
-            find_program(ALP_NINJA_EXECUTABLE ninja)
-            if (NOT ALP_NINJA_EXECUTABLE)
-                message(FATAL_ERROR "ninja not found")
-            endif()
-        endif()
-
-        if (NOT DEFINED ALP_GIT_EXECUTABLE)
-            find_program(ALP_GIT_EXECUTABLE git)
-            if (NOT ALP_GIT_EXECUTABLE)
-                message(FATAL_ERROR "git not found")
-            endif()
-        endif()
-
-        execute_process(
-            COMMAND ${Python3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/misc/scripts/install_sdl.py"
-                --install-prefix "${ALP_SDL_INSTALL_DIR}"
-                --cmake-path "${ALP_CMAKE_EXECUTABLE}"
-                --ninja-path "${ALP_NINJA_EXECUTABLE}"
-                --git-path "${ALP_GIT_EXECUTABLE}"
-            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-            RESULT_VARIABLE SDL_RESULT
+    if (ANDROID)
+        find_package(Threads REQUIRED)
+        find_library(ALP_ANDROID_LOG_LIBRARY log REQUIRED)
+        target_include_directories(webgpu PUBLIC "${ALP_DAWN_INSTALL_DIR}/include")
+        target_link_libraries(webgpu PUBLIC
+            "${ALP_DAWN_INSTALL_DIR}/lib/libwebgpu_dawn.a"
+            android
+            ${ALP_ANDROID_LOG_LIBRARY}
+            dl
+            Threads::Threads
         )
-        if (NOT SDL_RESULT EQUAL 0)
-            message(FATAL_ERROR "install_sdl.py failed.")
-        endif()
+    else()
+        set(Dawn_DIR "${ALP_DAWN_CMAKE_PACKAGE}")
+        find_package(Dawn REQUIRED CONFIG PATHS "${ALP_DAWN_CMAKE_PACKAGE}" NO_DEFAULT_PATH)
+        target_link_libraries(webgpu PUBLIC dawn::webgpu_dawn)
     endif()
 
-    # find and add SDL2 (you may install it to the default install folder or ALP_SDL_INSTALL_DIR)
-    # Add ALP_SDL_INSTALL_DIR to CMake's search path for find_package
-    list(APPEND CMAKE_PREFIX_PATH "${ALP_SDL_INSTALL_DIR}")
-    find_package(SDL2 REQUIRED)
-    target_link_libraries(webgpu PUBLIC SDL2::SDL2 SDL2::SDL2main)
+    if (NOT ANDROID)
+        # Ensure SDL is installed for the SDL-backed desktop/WebAssembly app.
+        if (NOT EXISTS "${ALP_SDL_INSTALL_DIR}")
+            message(STATUS "SDL not found - running install_sdl.py...")
+
+            if (NOT DEFINED ALP_CMAKE_EXECUTABLE)
+                find_program(ALP_CMAKE_EXECUTABLE cmake)
+                if (NOT ALP_CMAKE_EXECUTABLE)
+                    message(FATAL_ERROR "cmake not found")
+                endif()
+            endif()
+
+            if (NOT DEFINED ALP_NINJA_EXECUTABLE)
+                find_program(ALP_NINJA_EXECUTABLE ninja)
+                if (NOT ALP_NINJA_EXECUTABLE)
+                    message(FATAL_ERROR "ninja not found")
+                endif()
+            endif()
+
+            if (NOT DEFINED ALP_GIT_EXECUTABLE)
+                find_program(ALP_GIT_EXECUTABLE git)
+                if (NOT ALP_GIT_EXECUTABLE)
+                    message(FATAL_ERROR "git not found")
+                endif()
+            endif()
+
+            execute_process(
+                COMMAND ${Python3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/misc/scripts/install_sdl.py"
+                    --install-prefix "${ALP_SDL_INSTALL_DIR}"
+                    --cmake-path "${ALP_CMAKE_EXECUTABLE}"
+                    --ninja-path "${ALP_NINJA_EXECUTABLE}"
+                    --git-path "${ALP_GIT_EXECUTABLE}"
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                RESULT_VARIABLE SDL_RESULT
+            )
+            if (NOT SDL_RESULT EQUAL 0)
+                message(FATAL_ERROR "install_sdl.py failed.")
+            endif()
+        endif()
+
+        # find and add SDL2 (you may install it to the default install folder or ALP_SDL_INSTALL_DIR)
+        set(SDL2_DIR "${ALP_SDL_INSTALL_DIR}/lib/cmake/SDL2")
+        find_package(SDL2 REQUIRED CONFIG PATHS "${SDL2_DIR}" NO_DEFAULT_PATH)
+        if (TARGET SDL2::SDL2)
+            target_link_libraries(webgpu PUBLIC SDL2::SDL2)
+        elseif(TARGET SDL2::SDL2-static)
+            target_link_libraries(webgpu PUBLIC SDL2::SDL2-static)
+        else()
+            message(FATAL_ERROR "SDL2 package did not provide SDL2::SDL2 or SDL2::SDL2-static")
+        endif()
+        if (TARGET SDL2::SDL2main)
+            target_link_libraries(webgpu PUBLIC SDL2::SDL2main)
+        endif()
+    endif()
 
     # TODO verify whether this is still needed and adapt accordingly
     # If tint_lang_hlsl_writer.lib within ${ALP_DAWN_DIR}/build/debug/src exists DAWN was compiled with DX-Backends.

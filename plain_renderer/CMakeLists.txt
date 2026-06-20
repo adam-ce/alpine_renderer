@@ -31,6 +31,13 @@ target_include_directories(plain_renderer PRIVATE .)
 
 alp_configure_target(plain_renderer)
 
+if (ANDROID)
+    add_android_openssl_libraries(plain_renderer)
+    install(TARGETS plain_renderer
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
 if (EMSCRIPTEN)
     message(NOTICE "ALP_WWW_INSTALL_DIR = ${ALP_WWW_INSTALL_DIR}")
     configure_file(../site/mascot.png mascot.png COPYONLY)

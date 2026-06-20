@@ -52,8 +52,10 @@
  */
 #pragma once
 
-#include <SDL2/SDL.h>
 #include <webgpu/webgpu.h>
+
+#if !defined(__ANDROID__)
+#include <SDL2/SDL.h>
 
 extern "C" {
 
@@ -63,6 +65,7 @@ extern "C" {
 // WGPUSurface glfwGetWGPUSurface(WGPUInstance instance, GLFWwindow* window);
 WGPUSurface SDL_GetWGPUSurface(WGPUInstance instance, SDL_Window* window);
 }
+#endif
 
 namespace webgpu {
 

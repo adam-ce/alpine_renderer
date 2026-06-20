@@ -25,6 +25,10 @@ alp_add_git_repository(qml_catch2_console URL https://github.com/AlpineMapsOrg/q
 if (EMSCRIPTEN AND ALP_ENABLE_THREADING)
     target_compile_options(Catch2 PRIVATE -pthread)
 endif()
+if (ANDROID)
+    find_library(ALP_ANDROID_LOG_LIBRARY log REQUIRED)
+    target_link_libraries(Catch2 PUBLIC ${ALP_ANDROID_LOG_LIBRARY})
+endif()
 
 include(${qml_catch2_console_SOURCE_DIR}/src/qml_catch2_console.cmake)
 
