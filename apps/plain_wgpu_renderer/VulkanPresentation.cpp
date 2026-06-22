@@ -29,19 +29,17 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cmath>
 #include <cstring>
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <poll.h>
 #include <set>
 #include <unistd.h>
 #include <utility>
 #include <vector>
-
-#ifdef Q_OS_ANDROID
-#include <android/hardware_buffer.h>
-#endif
 
 namespace {
 
@@ -58,6 +56,31 @@ void close_fd(int& fd)
         fd = -1;
     }
 }
+
+#ifdef Q_OS_ANDROID
+void wait_sync_fd(int& fd, const char* what)
+{
+    if (fd < 0)
+        return;
+
+    pollfd sync_poll {};
+    sync_poll.fd = fd;
+    sync_poll.events = POLLIN;
+
+    int result = 0;
+    do {
+        result = ::poll(&sync_poll, 1, -1);
+    } while (result < 0 && errno == EINTR);
+
+    if (result < 0) {
+        const int error = errno;
+        close_fd(fd);
+        qFatal("%s failed while polling sync FD, errno %d", what, error);
+    }
+
+    close_fd(fd);
+}
+#endif
 
 uint32_t clamp_u32(uint32_t value, uint32_t min, uint32_t max)
 {
@@ -106,6 +129,7 @@ struct VulkanPresentation::Impl {
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkDeviceSize allocation_size = 0;
         uint32_t memory_type_index = 0;
+        WGPUSharedTextureMemory shared_memory = nullptr;
         WGPUTexture texture = nullptr;
         WGPUTextureView view = nullptr;
         int dawn_wait_fd = -1;
@@ -113,9 +137,6 @@ struct VulkanPresentation::Impl {
         VkImageLayout dawn_wait_new_layout = VK_IMAGE_LAYOUT_GENERAL;
         bool dawn_initialized = false;
         bool dedicated_allocation = true;
-#ifdef Q_OS_ANDROID
-        AHardwareBuffer* hardware_buffer = nullptr;
-#endif
     };
 
     QVulkanInstance& qt_instance;
@@ -147,9 +168,6 @@ struct VulkanPresentation::Impl {
     PFN_vkGetMemoryFdKHR vk_get_memory_fd = nullptr;
     PFN_vkGetSemaphoreFdKHR vk_get_semaphore_fd = nullptr;
     PFN_vkImportSemaphoreFdKHR vk_import_semaphore_fd = nullptr;
-#ifdef Q_OS_ANDROID
-    PFN_vkGetAndroidHardwareBufferPropertiesANDROID vk_get_android_hardware_buffer_properties = nullptr;
-#endif
 
     SharedTarget shared;
 
@@ -287,12 +305,7 @@ struct VulkanPresentation::Impl {
             VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
             VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
         };
-#ifdef Q_OS_ANDROID
-        extensions.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
-        extensions.push_back(VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
-#else
         extensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
-#endif
         return extensions;
     }
 
@@ -373,23 +386,11 @@ struct VulkanPresentation::Impl {
 
     void load_device_functions()
     {
-#ifndef Q_OS_ANDROID
         vk_get_memory_fd = reinterpret_cast<PFN_vkGetMemoryFdKHR>(vkGetDeviceProcAddr(device, "vkGetMemoryFdKHR"));
-#endif
         vk_get_semaphore_fd = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(vkGetDeviceProcAddr(device, "vkGetSemaphoreFdKHR"));
         vk_import_semaphore_fd = reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(vkGetDeviceProcAddr(device, "vkImportSemaphoreFdKHR"));
-        if (
-#ifndef Q_OS_ANDROID
-            !vk_get_memory_fd ||
-#endif
-            !vk_get_semaphore_fd || !vk_import_semaphore_fd)
+        if (!vk_get_memory_fd || !vk_get_semaphore_fd || !vk_import_semaphore_fd)
             qFatal("Vulkan external FD entry points are not available");
-#ifdef Q_OS_ANDROID
-        vk_get_android_hardware_buffer_properties = reinterpret_cast<PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(
-            vkGetDeviceProcAddr(device, "vkGetAndroidHardwareBufferPropertiesANDROID"));
-        if (!vk_get_android_hardware_buffer_properties)
-            qFatal("Vulkan AHardwareBuffer entry points are not available");
-#endif
     }
 
     void create_command_pool()
@@ -561,7 +562,7 @@ struct VulkanPresentation::Impl {
         format_info.type = VK_IMAGE_TYPE_2D;
         format_info.tiling = VK_IMAGE_TILING_OPTIMAL;
         format_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        format_info.flags = 0;
+        format_info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
 
         VkExternalImageFormatProperties external_properties { VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES };
         VkImageFormatProperties2 properties { VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2 };
@@ -586,15 +587,6 @@ struct VulkanPresentation::Impl {
 
     void choose_shared_format()
     {
-#ifdef Q_OS_ANDROID
-        shared_format = VK_FORMAT_R8G8B8A8_UNORM;
-        dawn_texture_format = wgpu_format(shared_format);
-        if (shared_format != swapchain_format) {
-            if (!has_blit_support(shared_format, VK_FORMAT_FEATURE_BLIT_SRC_BIT) || !has_blit_support(swapchain_format, VK_FORMAT_FEATURE_BLIT_DST_BIT))
-                qFatal("Android shared AHardwareBuffer format cannot be blitted to the swapchain format");
-        }
-        qInfo() << "Using Android AHardwareBuffer shared image format" << shared_format << "for swapchain format" << swapchain_format;
-#else
         std::vector<VkFormat> candidates {
             swapchain_format,
             VK_FORMAT_R8G8B8A8_UNORM,
@@ -620,20 +612,16 @@ struct VulkanPresentation::Impl {
         }
 
         qFatal("No exportable Vulkan color format is available for Dawn interop");
-#endif
     }
 
     void recreate_shared_target()
     {
-#ifdef Q_OS_ANDROID
-        recreate_android_shared_target();
-        return;
-#else
         shared.external_image_info = VkExternalMemoryImageCreateInfo { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
         shared.external_image_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
 
         shared.image_create_info = VkImageCreateInfo { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
         shared.image_create_info.pNext = &shared.external_image_info;
+        shared.image_create_info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
         shared.image_create_info.imageType = VK_IMAGE_TYPE_2D;
         shared.image_create_info.format = shared_format;
         shared.image_create_info.extent = { extent.width, extent.height, 1 };
@@ -667,68 +655,7 @@ struct VulkanPresentation::Impl {
         check_vk(vkAllocateMemory(device, &allocate_info, nullptr, &shared.memory), "vkAllocateMemory(shared)");
         check_vk(vkBindImageMemory(device, shared.image, shared.memory, 0), "vkBindImageMemory(shared)");
         shared.dedicated_allocation = true;
-#endif
     }
-
-#ifdef Q_OS_ANDROID
-    void recreate_android_shared_target()
-    {
-        AHardwareBuffer_Desc buffer_desc {};
-        buffer_desc.width = extent.width;
-        buffer_desc.height = extent.height;
-        buffer_desc.layers = 1;
-        buffer_desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
-        buffer_desc.usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
-
-        if (AHardwareBuffer_allocate(&buffer_desc, &shared.hardware_buffer) != 0 || !shared.hardware_buffer)
-            qFatal("AHardwareBuffer_allocate failed");
-
-        VkAndroidHardwareBufferFormatPropertiesANDROID format_properties { VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID };
-        VkAndroidHardwareBufferPropertiesANDROID buffer_properties { VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID };
-        buffer_properties.pNext = &format_properties;
-        check_vk(vk_get_android_hardware_buffer_properties(device, shared.hardware_buffer, &buffer_properties),
-            "vkGetAndroidHardwareBufferPropertiesANDROID");
-
-        shared.external_image_info = VkExternalMemoryImageCreateInfo { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
-        shared.external_image_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
-
-        shared.image_create_info = VkImageCreateInfo { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-        shared.image_create_info.pNext = &shared.external_image_info;
-        shared.image_create_info.imageType = VK_IMAGE_TYPE_2D;
-        shared.image_create_info.format = shared_format;
-        shared.image_create_info.extent = { extent.width, extent.height, 1 };
-        shared.image_create_info.mipLevels = 1;
-        shared.image_create_info.arrayLayers = 1;
-        shared.image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
-        shared.image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-        shared.image_create_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        shared.image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        shared.image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-        check_vk(vkCreateImage(device, &shared.image_create_info, nullptr, &shared.image), "vkCreateImage(shared AHardwareBuffer)");
-
-        VkMemoryRequirements requirements {};
-        vkGetImageMemoryRequirements(device, shared.image, &requirements);
-        shared.allocation_size = buffer_properties.allocationSize;
-        shared.memory_type_index = find_memory_type(requirements.memoryTypeBits & buffer_properties.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-        VkMemoryDedicatedAllocateInfo dedicated_info { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
-        dedicated_info.image = shared.image;
-
-        VkImportAndroidHardwareBufferInfoANDROID import_info { VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID };
-        import_info.pNext = &dedicated_info;
-        import_info.buffer = shared.hardware_buffer;
-
-        VkMemoryAllocateInfo allocate_info { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-        allocate_info.pNext = &import_info;
-        allocate_info.allocationSize = shared.allocation_size;
-        allocate_info.memoryTypeIndex = shared.memory_type_index;
-
-        check_vk(vkAllocateMemory(device, &allocate_info, nullptr, &shared.memory), "vkAllocateMemory(shared AHardwareBuffer)");
-        check_vk(vkBindImageMemory(device, shared.image, shared.memory, 0), "vkBindImageMemory(shared AHardwareBuffer)");
-        shared.dedicated_allocation = true;
-    }
-#endif
 
     int export_memory_fd(VkDeviceMemory memory)
     {
@@ -750,8 +677,6 @@ struct VulkanPresentation::Impl {
         texture_desc.format = dawn_texture_format;
         texture_desc.mipLevelCount = 1;
         texture_desc.sampleCount = 1;
-        texture_desc.viewFormatCount = 1;
-        texture_desc.viewFormats = &dawn_texture_format;
         return texture_desc;
     }
 
@@ -769,6 +694,54 @@ struct VulkanPresentation::Impl {
             qFatal("wgpuTextureCreateView(shared render target) failed");
     }
 
+#ifdef Q_OS_ANDROID
+    void import_android_shared_texture_memory()
+    {
+        if (shared.shared_memory)
+            return;
+
+        WGPUSharedTextureMemoryOpaqueFDDescriptor fd_desc {};
+        fd_desc.chain.sType = WGPUSType_SharedTextureMemoryOpaqueFDDescriptor;
+        fd_desc.vkImageCreateInfo = &shared.image_create_info;
+        fd_desc.memoryFD = export_memory_fd(shared.memory);
+        fd_desc.memoryTypeIndex = shared.memory_type_index;
+        fd_desc.allocationSize = shared.allocation_size;
+        fd_desc.dedicatedAllocation = shared.dedicated_allocation;
+
+        WGPUSharedTextureMemoryDescriptor descriptor {};
+        descriptor.nextInChain = &fd_desc.chain;
+        descriptor.label = WGPUStringView { .data = "plain renderer Android shared texture memory", .length = WGPU_STRLEN };
+
+        shared.shared_memory = wgpuDeviceImportSharedTextureMemory(wgpu_device, &descriptor);
+        if (!shared.shared_memory) {
+            close_fd(fd_desc.memoryFD);
+            qFatal("wgpuDeviceImportSharedTextureMemory(opaque FD) failed");
+        }
+    }
+
+    WGPUSharedFence import_android_wait_fence()
+    {
+        if (shared.dawn_wait_fd < 0)
+            return nullptr;
+
+        WGPUSharedFenceSyncFDDescriptor sync_desc {};
+        sync_desc.chain.sType = WGPUSType_SharedFenceSyncFDDescriptor;
+        sync_desc.handle = shared.dawn_wait_fd;
+
+        WGPUSharedFenceDescriptor descriptor {};
+        descriptor.nextInChain = &sync_desc.chain;
+
+        WGPUSharedFence fence = wgpuDeviceImportSharedFence(wgpu_device, &descriptor);
+        if (!fence) {
+            close_fd(shared.dawn_wait_fd);
+            qFatal("wgpuDeviceImportSharedFence(sync FD) failed");
+        }
+
+        shared.dawn_wait_fd = -1;
+        return fence;
+    }
+#endif
+
     void destroy_shared_target()
     {
         close_fd(shared.dawn_wait_fd);
@@ -776,14 +749,12 @@ struct VulkanPresentation::Impl {
             wgpuTextureViewRelease(shared.view);
         if (shared.texture)
             wgpuTextureRelease(shared.texture);
+        if (shared.shared_memory)
+            wgpuSharedTextureMemoryRelease(shared.shared_memory);
         if (shared.memory != VK_NULL_HANDLE)
             vkFreeMemory(device, shared.memory, nullptr);
         if (shared.image != VK_NULL_HANDLE)
             vkDestroyImage(device, shared.image, nullptr);
-#ifdef Q_OS_ANDROID
-        if (shared.hardware_buffer)
-            AHardwareBuffer_release(shared.hardware_buffer);
-#endif
         shared = SharedTarget {};
     }
 
@@ -872,15 +843,34 @@ struct VulkanPresentation::Impl {
 
         WGPUTextureDescriptor texture_desc = shared_texture_descriptor();
 #ifdef Q_OS_ANDROID
-        dawn::native::vulkan::ExternalImageDescriptorAHardwareBuffer descriptor;
-        descriptor.cTextureDescriptor = &texture_desc;
-        descriptor.isInitialized = shared.dawn_initialized;
-        descriptor.handle = shared.hardware_buffer;
-        descriptor.releasedOldLayout = shared.dawn_wait_old_layout;
-        descriptor.releasedNewLayout = shared.dawn_wait_new_layout;
-        descriptor.dedicatedAllocation = dawn::native::vulkan::NeedsDedicatedAllocation::Detect;
-        if (shared.dawn_wait_fd >= 0)
-            descriptor.waitFDs.push_back(shared.dawn_wait_fd);
+        import_android_shared_texture_memory();
+
+        shared.texture = wgpuSharedTextureMemoryCreateTexture(shared.shared_memory, &texture_desc);
+        if (!shared.texture)
+            qFatal("wgpuSharedTextureMemoryCreateTexture failed");
+
+        WGPUSharedFence wait_fence = import_android_wait_fence();
+        uint64_t wait_value = 1;
+
+        WGPUSharedTextureMemoryVkImageLayoutBeginState layout_begin {};
+        layout_begin.chain.sType = WGPUSType_SharedTextureMemoryVkImageLayoutBeginState;
+        layout_begin.oldLayout = int32_t(shared.dawn_wait_old_layout);
+        layout_begin.newLayout = int32_t(shared.dawn_wait_new_layout);
+
+        WGPUSharedTextureMemoryBeginAccessDescriptor begin {};
+        begin.nextInChain = &layout_begin.chain;
+        begin.initialized = shared.dawn_initialized;
+        if (wait_fence) {
+            begin.fenceCount = 1;
+            begin.fences = &wait_fence;
+            begin.signaledValues = &wait_value;
+        }
+
+        WGPUStatus begin_status = wgpuSharedTextureMemoryBeginAccess(shared.shared_memory, shared.texture, &begin);
+        if (wait_fence)
+            wgpuSharedFenceRelease(wait_fence);
+        if (begin_status != WGPUStatus_Success)
+            qFatal("wgpuSharedTextureMemoryBeginAccess failed with status %d", int(begin_status));
 #else
         dawn::native::vulkan::ExternalImageDescriptorOpaqueFD descriptor;
         descriptor.cTextureDescriptor = &texture_desc;
@@ -895,19 +885,17 @@ struct VulkanPresentation::Impl {
             : dawn::native::vulkan::NeedsDedicatedAllocation::No;
         if (shared.dawn_wait_fd >= 0)
             descriptor.waitFDs.push_back(shared.dawn_wait_fd);
-#endif
 
         shared.texture = dawn::native::vulkan::WrapVulkanImage(wgpu_device, &descriptor);
         if (!shared.texture) {
-#ifndef Q_OS_ANDROID
             close_fd(descriptor.memoryFD);
-#endif
             for (int& fd : descriptor.waitFDs)
                 close_fd(fd);
             shared.dawn_wait_fd = -1;
             qFatal("dawn::native::vulkan::WrapVulkanImage failed");
         }
         shared.dawn_wait_fd = -1;
+#endif
         create_shared_texture_view();
     }
 
@@ -920,10 +908,38 @@ struct VulkanPresentation::Impl {
         shared.view = nullptr;
 
 #ifdef Q_OS_ANDROID
-        dawn::native::vulkan::ExternalImageExportInfoAHardwareBuffer export_info;
+        WGPUSharedTextureMemoryVkImageLayoutEndState layout_end {};
+        layout_end.chain.sType = WGPUSType_SharedTextureMemoryVkImageLayoutEndState;
+
+        WGPUSharedTextureMemoryEndAccessState end {};
+        end.nextInChain = &layout_end.chain;
+        WGPUStatus end_status = wgpuSharedTextureMemoryEndAccess(shared.shared_memory, shared.texture, &end);
+        wgpuTextureRelease(shared.texture);
+        shared.texture = nullptr;
+
+        if (end_status != WGPUStatus_Success)
+            qFatal("wgpuSharedTextureMemoryEndAccess failed with status %d", int(end_status));
+        if (end.fenceCount != 1)
+            qFatal("Expected one Dawn release fence, got %zu", end.fenceCount);
+
+        WGPUSharedFenceSyncFDExportInfo sync_export {};
+        sync_export.chain.sType = WGPUSType_SharedFenceSyncFDExportInfo;
+        sync_export.handle = -1;
+
+        WGPUSharedFenceExportInfo fence_export {};
+        fence_export.nextInChain = &sync_export.chain;
+        wgpuSharedFenceExportInfo(end.fences[0], &fence_export);
+
+        int dawn_release_fd = sync_export.handle;
+        VkImageLayout released_old_layout = VkImageLayout(layout_end.oldLayout);
+        VkImageLayout released_new_layout = VkImageLayout(layout_end.newLayout);
+
+        wgpuSharedTextureMemoryEndAccessStateFreeMembers(end);
+
+        if (dawn_release_fd < 0)
+            qFatal("Dawn did not export a sync FD release fence");
 #else
         dawn::native::vulkan::ExternalImageExportInfoOpaqueFD export_info;
-#endif
         if (!dawn::native::vulkan::ExportVulkanImage(shared.texture, &export_info))
             qFatal("dawn::native::vulkan::ExportVulkanImage failed");
         wgpuTextureRelease(shared.texture);
@@ -935,6 +951,7 @@ struct VulkanPresentation::Impl {
         int dawn_release_fd = export_info.semaphoreHandles[0];
         VkImageLayout released_old_layout = export_info.releasedOldLayout;
         VkImageLayout released_new_layout = export_info.releasedNewLayout;
+#endif
 
         present_after_dawn(dawn_release_fd, released_old_layout, released_new_layout);
     }
@@ -1030,6 +1047,7 @@ struct VulkanPresentation::Impl {
         swapchain_to_present.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &swapchain_to_present);
 
+#ifndef Q_OS_ANDROID
         VkImageMemoryBarrier release_barrier = acquire_barrier;
         release_barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         release_barrier.dstAccessMask = 0;
@@ -1038,6 +1056,7 @@ struct VulkanPresentation::Impl {
         release_barrier.srcQueueFamilyIndex = queues.graphics;
         release_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL_KHR;
         vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &release_barrier);
+#endif
 
         check_vk(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
         swapchain_image_layouts[image_index] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
@@ -1052,25 +1071,51 @@ struct VulkanPresentation::Impl {
         cleanup_retired_semaphores();
         check_vk(vkResetFences(device, 1, &frame_fence), "vkResetFences(frame)");
 
+#ifdef Q_OS_ANDROID
+        wait_sync_fd(dawn_release_fd, "Dawn release sync FD wait");
+        VkSemaphore dawn_wait = VK_NULL_HANDLE;
+#else
         VkSemaphore dawn_wait = import_semaphore_fd(dawn_release_fd);
+#endif
 
         uint32_t image_index = 0;
         VkResult acquire_result = vkAcquireNextImageKHR(device, swapchain, std::numeric_limits<uint64_t>::max(), image_available, VK_NULL_HANDLE, &image_index);
         if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
-            vkDestroySemaphore(device, dawn_wait, nullptr);
+            if (dawn_wait != VK_NULL_HANDLE)
+                vkDestroySemaphore(device, dawn_wait, nullptr);
             resize(current_pixel_size());
             return;
         }
         if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) {
-            vkDestroySemaphore(device, dawn_wait, nullptr);
+            if (dawn_wait != VK_NULL_HANDLE)
+                vkDestroySemaphore(device, dawn_wait, nullptr);
             qFatal("vkAcquireNextImageKHR failed with VkResult %d", int(acquire_result));
         }
 
-        VkSemaphore dawn_release = create_semaphore(true);
         record_copy_to_swapchain(image_index, dawn_old_layout, dawn_new_layout);
 
+#ifdef Q_OS_ANDROID
+        std::array<VkSemaphore, 1> wait_semaphores { image_available };
+        std::array<VkPipelineStageFlags, 1> wait_stages { VK_PIPELINE_STAGE_TRANSFER_BIT };
+#else
         std::array<VkSemaphore, 2> wait_semaphores { image_available, dawn_wait };
         std::array<VkPipelineStageFlags, 2> wait_stages { VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT };
+#endif
+#ifdef Q_OS_ANDROID
+        VkSubmitInfo submit_info { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        submit_info.waitSemaphoreCount = uint32_t(wait_semaphores.size());
+        submit_info.pWaitSemaphores = wait_semaphores.data();
+        submit_info.pWaitDstStageMask = wait_stages.data();
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &command_buffer;
+        submit_info.signalSemaphoreCount = 1;
+        submit_info.pSignalSemaphores = &render_finished;
+        check_vk(vkQueueSubmit(graphics_queue, 1, &submit_info, frame_fence), "vkQueueSubmit(copy to swapchain)");
+
+        check_vk(vkWaitForFences(device, 1, &frame_fence, VK_TRUE, std::numeric_limits<uint64_t>::max()), "vkWaitForFences(copy to swapchain)");
+        release_shared_target_to_dawn(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, true);
+#else
+        VkSemaphore dawn_release = create_semaphore(true);
         std::array<VkSemaphore, 2> signal_semaphores { render_finished, dawn_release };
 
         VkSubmitInfo submit_info { VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -1087,6 +1132,7 @@ struct VulkanPresentation::Impl {
         shared.dawn_wait_old_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         shared.dawn_wait_new_layout = VK_IMAGE_LAYOUT_GENERAL;
         shared.dawn_initialized = true;
+#endif
 
         VkPresentInfoKHR present_info { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
         present_info.waitSemaphoreCount = 1;
@@ -1101,8 +1147,11 @@ struct VulkanPresentation::Impl {
             qFatal("vkQueuePresentKHR failed with VkResult %d", int(present_result));
         }
 
-        retired_semaphores.push_back(dawn_wait);
+        if (dawn_wait != VK_NULL_HANDLE)
+            retired_semaphores.push_back(dawn_wait);
+#ifndef Q_OS_ANDROID
         retired_semaphores.push_back(dawn_release);
+#endif
     }
 };
 

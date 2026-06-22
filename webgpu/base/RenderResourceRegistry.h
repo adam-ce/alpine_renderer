@@ -36,6 +36,7 @@ public:
 
     // Set the local filesystem path prefix for a targets shaders (for hot-reload).
     void set_local_shader_path(const std::string& target, const std::string& path);
+    void define_shader_symbol(const std::string& symbol);
 
     // Register a shader by name and source path.
     void register_shader(const std::string& name, const std::string& source_path);

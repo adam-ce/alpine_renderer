@@ -37,6 +37,21 @@
 @group(2) @binding(4) var ortho_sampler: sampler;
 
 struct VertexIn {
+///ifdef ALP_ANDROID_SCALAR_VERTEX_ATTRIBUTES
+    @location(0) bounds_x: f32,
+    @location(1) bounds_y: f32,
+    @location(2) bounds_z: f32,
+    @location(3) bounds_w: f32,
+    @location(4) height_texture_layer: i32,
+    @location(5) ortho_texture_layer: i32,
+    @location(6) tileset_id: i32,
+    @location(7) height_zoomlevel: i32,
+    @location(8) tile_id_x: u32,
+    @location(9) tile_id_y: u32,
+    @location(10) tile_id_z: u32,
+    @location(11) tile_id_w: u32,
+    @location(12) ortho_zoomlevel: i32,
+///else
     @location(0) bounds: vec4f,
     @location(1) height_texture_layer: i32,
     @location(2) ortho_texture_layer: i32,
@@ -44,6 +59,7 @@ struct VertexIn {
     @location(4) height_zoomlevel: i32,
     @location(5) tile_id: vec4<u32>,
     @location(6) ortho_zoomlevel: i32,
+///endif
 }
 
 struct VertexOut {
@@ -51,11 +67,16 @@ struct VertexOut {
     @location(0) uv: vec2f,
     @location(1) pos_cws: vec3f,
     @location(2) normal: vec3f,
+///ifdef ALP_ANDROID_SCALAR_VERTEX_ATTRIBUTES
+    @location(3) color: vec3f,
+    @location(4) @interpolate(flat) ortho_texture_layer: f32,
+///else
     @location(3) @interpolate(flat) height_texture_layer: i32,
     @location(4) @interpolate(flat) ortho_texture_layer: i32,
     @location(5) @interpolate(flat) color: vec3f,
     @location(6) @interpolate(flat) tile_id: vec3<u32>,
     @location(7) @interpolate(flat) ortho_zoomlevel: i32,
+///endif
 }
 
 struct FragOut {
@@ -174,24 +195,42 @@ fn normal_by_fragment_position_interpolation(pos_cws: vec3<f32>) -> vec3<f32> {
 
 @vertex
 fn vertexMain(@builtin(vertex_index) vertex_index: u32, vertex_in: VertexIn) -> VertexOut {
-    let render_tile_id = TileId(vertex_in.tile_id.x, vertex_in.tile_id.y, vertex_in.tile_id.z, 4294967295u);
+///ifdef ALP_ANDROID_SCALAR_VERTEX_ATTRIBUTES
+    let bounds = vec4f(vertex_in.bounds_x, vertex_in.bounds_y, vertex_in.bounds_z, vertex_in.bounds_w);
+    let tile_id_vec = vec4<u32>(vertex_in.tile_id_x, vertex_in.tile_id_y, vertex_in.tile_id_z, vertex_in.tile_id_w);
+///else
+    let bounds = vertex_in.bounds;
+    let tile_id_vec = vertex_in.tile_id;
+///endif
+    let render_tile_id = TileId(tile_id_vec.x, tile_id_vec.y, tile_id_vec.z, 4294967295u);
 
     var position: vec3f;
     var uv: vec2f;
     var height_tile_id: TileId;
     var normal: vec3f;
-    compute_vertex(i32(vertex_index), render_tile_id, vertex_in.bounds, u32(vertex_in.height_zoomlevel), vertex_in.height_texture_layer,
+    compute_vertex(i32(vertex_index), render_tile_id, bounds, u32(vertex_in.height_zoomlevel), vertex_in.height_texture_layer,
         &position, &uv, &height_tile_id, true, &normal);
 
     let clip_pos: vec4f = camera.view_proj_matrix * vec4f(position, 1.0);
 
     var vertex_out: VertexOut;
     vertex_out.position = clip_pos;
+///ifdef ALP_ANDROID_SCALAR_VERTEX_ATTRIBUTES
+    var ortho_tile_id: TileId;
+    var ortho_uv: vec2f;
+    _ = decrease_zoom_level_until(render_tile_id, uv, u32(vertex_in.ortho_zoomlevel), &ortho_tile_id, &ortho_uv);
+    vertex_out.uv = ortho_uv;
+///else
     vertex_out.uv = uv;
+///endif
     vertex_out.pos_cws = position;
     vertex_out.normal = normal;
+///ifndef ALP_ANDROID_SCALAR_VERTEX_ATTRIBUTES
     vertex_out.height_texture_layer = vertex_in.height_texture_layer;
     vertex_out.ortho_texture_layer = vertex_in.ortho_texture_layer;
+///else
+    vertex_out.ortho_texture_layer = f32(vertex_in.ortho_texture_layer);
+///endif
 
     var vertex_color = vec3f(0.0);
     if config.overlay_mode == 2 {
@@ -203,13 +242,18 @@ fn vertexMain(@builtin(vertex_index) vertex_index: u32, vertex_in: VertexIn) -> 
         vertex_color = color_from_id_hash(u32(vertex_index));
     }
     vertex_out.color = vertex_color;
-    vertex_out.tile_id = vertex_in.tile_id.xyz;
+///ifndef ALP_ANDROID_SCALAR_VERTEX_ATTRIBUTES
+    vertex_out.tile_id = tile_id_vec.xyz;
     vertex_out.ortho_zoomlevel = vertex_in.ortho_zoomlevel;
+///endif
     return vertex_out;
 }
 
 @fragment
 fn fragmentMain(vertex_out: VertexOut) -> FragOut {
+///ifdef ALP_ANDROID_SCALAR_VERTEX_ATTRIBUTES
+    var albedo = textureSample(ortho_texture, ortho_sampler, vertex_out.uv, i32(vertex_out.ortho_texture_layer)).rgb;
+///else
     let tile_id = TileId(vertex_out.tile_id.x, vertex_out.tile_id.y, vertex_out.tile_id.z, 4294967295u);
 
     //obtain uv coordinates for desired ortho zoom level and sample
@@ -217,6 +261,7 @@ fn fragmentMain(vertex_out: VertexOut) -> FragOut {
     var ortho_uv: vec2f;
     let found_ortho = decrease_zoom_level_until(tile_id, vertex_out.uv, u32(vertex_out.ortho_zoomlevel), &ortho_tile_id, &ortho_uv);
     var albedo = textureSample(ortho_texture, ortho_sampler, ortho_uv, vertex_out.ortho_texture_layer).rgb;
+///endif
 
     var frag_out: FragOut;
 

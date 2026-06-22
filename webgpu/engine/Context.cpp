@@ -20,6 +20,7 @@
 
 #include "Context.h"
 
+#include <QtGlobal>
 #include <webgpu/base/raii/BindGroupLayout.h>
 
 namespace webgpu_engine {
@@ -38,6 +39,9 @@ void Context::internal_initialise()
     auto& reg = webgpu_ctx().resource_registry();
     reg.set_local_shader_path("webgpu", ALP_SHADER_DIR_WEBGPU);
     reg.set_local_shader_path("webgpu_engine", ALP_SHADER_DIR_WEBGPU_ENGINE);
+#ifdef Q_OS_ANDROID
+    reg.define_shader_symbol("ALP_ANDROID_SCALAR_VERTEX_ATTRIBUTES");
+#endif
 
     reg.register_bind_group_layout("shared_config", [](WGPUDevice device) {
         WGPUBindGroupLayoutEntry entry {};

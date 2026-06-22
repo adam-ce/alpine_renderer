@@ -36,6 +36,7 @@
 #include <QWheelEvent>
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace {
 
@@ -97,7 +98,6 @@ void Window::initialise_gpu()
     m_context->webgpu_ctx().resource_registry().recreate_all(m_device);
     create_bind_groups();
     create_compose_pipeline();
-
     resize_framebuffer(m_surface_size);
 
     m_initialized = true;
@@ -256,6 +256,16 @@ void Window::create_webgpu_context()
     WGPUDeviceDescriptor device_desc {};
     device_desc.label = WGPUStringView { .data = "plain_wgpu_renderer device", .length = WGPU_STRLEN };
     device_desc.requiredLimits = &required_limits;
+#ifdef Q_OS_ANDROID
+    std::vector<WGPUFeatureName> required_features;
+    for (WGPUFeatureName feature : { WGPUFeatureName_SharedTextureMemoryOpaqueFD, WGPUFeatureName_SharedFenceSyncFD }) {
+        if (!wgpuAdapterHasFeature(m_adapter, feature))
+            qFatal("Dawn Vulkan adapter does not support required Android interop feature %d", int(feature));
+        required_features.push_back(feature);
+    }
+    device_desc.requiredFeatureCount = required_features.size();
+    device_desc.requiredFeatures = required_features.data();
+#endif
     device_desc.defaultQueue.label = WGPUStringView { .data = "plain_wgpu_renderer queue", .length = WGPU_STRLEN };
     device_desc.uncapturedErrorCallbackInfo = WGPUUncapturedErrorCallbackInfo {
         .nextInChain = nullptr,
@@ -365,7 +375,9 @@ fn fragmentMain(vertex_out: VertexOut) -> @location(0) vec4f {
         *m_compose_shader,
         std::vector<webgpu::util::SingleVertexBufferInfo> {},
         format,
-        std::vector<const webgpu::raii::BindGroupLayout*> { m_compose_bind_group_layout.get() });
+        std::vector<const webgpu::raii::BindGroupLayout*> { m_compose_bind_group_layout.get() },
+        std::vector<std::optional<WGPUBlendState>> {},
+        "plain compose pipeline");
 }
 
 void Window::resize_framebuffer(const glm::uvec2& size)

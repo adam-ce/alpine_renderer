@@ -168,6 +168,28 @@ void TileMeshRenderer::init(webgpu::Context& ctx)
             "tile bind group");
     });
     reg.register_pipeline([this](WGPUDevice dev, const webgpu::RenderResourceRegistry& reg) {
+#ifdef Q_OS_ANDROID
+        webgpu::util::SingleVertexBufferInfo bounds_buffer_info(WGPUVertexStepMode_Instance, sizeof(glm::vec4));
+        bounds_buffer_info.add_attribute<float, 1>(0, 0);
+        bounds_buffer_info.add_attribute<float, 1>(1, 4);
+        bounds_buffer_info.add_attribute<float, 1>(2, 8);
+        bounds_buffer_info.add_attribute<float, 1>(3, 12);
+        webgpu::util::SingleVertexBufferInfo texture_layer_buffer_info(WGPUVertexStepMode_Instance);
+        texture_layer_buffer_info.add_attribute<int32_t, 1>(4);
+        webgpu::util::SingleVertexBufferInfo ortho_texture_layer_buffer_info(WGPUVertexStepMode_Instance);
+        ortho_texture_layer_buffer_info.add_attribute<int32_t, 1>(5);
+        webgpu::util::SingleVertexBufferInfo tileset_id_buffer_info(WGPUVertexStepMode_Instance);
+        tileset_id_buffer_info.add_attribute<int32_t, 1>(6);
+        webgpu::util::SingleVertexBufferInfo height_zoomlevel_buffer_info(WGPUVertexStepMode_Instance);
+        height_zoomlevel_buffer_info.add_attribute<int32_t, 1>(7);
+        webgpu::util::SingleVertexBufferInfo tile_id_buffer_info(WGPUVertexStepMode_Instance, sizeof(nucleus::tile::GpuTileId));
+        tile_id_buffer_info.add_attribute<uint32_t, 1>(8, 0);
+        tile_id_buffer_info.add_attribute<uint32_t, 1>(9, 4);
+        tile_id_buffer_info.add_attribute<uint32_t, 1>(10, 8);
+        tile_id_buffer_info.add_attribute<uint32_t, 1>(11, 12);
+        webgpu::util::SingleVertexBufferInfo ortho_zoomlevel_buffer_info(WGPUVertexStepMode_Instance);
+        ortho_zoomlevel_buffer_info.add_attribute<int32_t, 1>(12);
+#else
         webgpu::util::SingleVertexBufferInfo bounds_buffer_info(WGPUVertexStepMode_Instance);
         bounds_buffer_info.add_attribute<float, 4>(0);
         webgpu::util::SingleVertexBufferInfo texture_layer_buffer_info(WGPUVertexStepMode_Instance);
@@ -182,6 +204,7 @@ void TileMeshRenderer::init(webgpu::Context& ctx)
         tile_id_buffer_info.add_attribute<uint32_t, 4>(5);
         webgpu::util::SingleVertexBufferInfo ortho_zoomlevel_buffer_info(WGPUVertexStepMode_Instance);
         ortho_zoomlevel_buffer_info.add_attribute<int32_t, 1>(6);
+#endif
 
         webgpu::FramebufferFormat format {};
         format.depth_format = WGPUTextureFormat_Depth24Plus;
@@ -207,7 +230,9 @@ void TileMeshRenderer::init(webgpu::Context& ctx)
                 &reg.bind_group_layout("shared_config"),
                 &reg.bind_group_layout("camera"),
                 &reg.bind_group_layout("tile"),
-            });
+            },
+            std::vector<std::optional<WGPUBlendState>> {},
+            "tile mesh render pipeline");
 
         m_tile_bind_group = create_bind_group(m_ortho_textures->texture_view(), m_ortho_textures->sampler());
     });

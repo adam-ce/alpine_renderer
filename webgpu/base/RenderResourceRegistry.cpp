@@ -33,6 +33,8 @@ RenderResourceRegistry::RenderResourceRegistry()
 
 void RenderResourceRegistry::set_local_shader_path(const std::string& target, const std::string& path) { m_local_shader_paths[target] = path; }
 
+void RenderResourceRegistry::define_shader_symbol(const std::string& symbol) { m_preprocessor.define(symbol); }
+
 void RenderResourceRegistry::register_shader(const std::string& name, const std::string& source_path)
 {
     if (has_shader(name)) // treat re-registration as a no-op

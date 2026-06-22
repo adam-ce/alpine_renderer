@@ -27,7 +27,7 @@ namespace webgpu::raii {
 
 GenericRenderPipeline::GenericRenderPipeline(WGPUDevice device, const ShaderModule& vertex_shader, const ShaderModule& fragment_shader,
     const VertexBufferInfos& vertex_buffer_infos, const FramebufferFormat& framebuffer_format, const BindGroupLayouts& bind_group_layouts,
-    const std::vector<std::optional<WGPUBlendState>>& blend_states)
+    const std::vector<std::optional<WGPUBlendState>>& blend_states, const char* label)
     : m_framebuffer_format { framebuffer_format }
 {
     assert(blend_states.size() <= framebuffer_format.color_formats.size());
@@ -62,6 +62,7 @@ GenericRenderPipeline::GenericRenderPipeline(WGPUDevice device, const ShaderModu
         [](const util::SingleVertexBufferInfo& info) { return info.vertex_buffer_layout(); });
 
     WGPURenderPipelineDescriptor pipeline_desc {};
+    pipeline_desc.label = WGPUStringView { .data = label, .length = WGPU_STRLEN };
     pipeline_desc.vertex.module = vertex_shader.handle();
     pipeline_desc.vertex.entryPoint = WGPUStringView { .data = "vertexMain", .length = WGPU_STRLEN };
     pipeline_desc.vertex.bufferCount = layouts.size();

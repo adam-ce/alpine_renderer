@@ -24,6 +24,7 @@
 #include "webgpu/base/Framebuffer.h"
 #include "webgpu/base/util/VertexBufferInfo.h"
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace webgpu::raii {
@@ -35,7 +36,7 @@ public:
 
     GenericRenderPipeline(WGPUDevice device, const ShaderModule& vertex_shader, const ShaderModule& fragment_shader,
         const VertexBufferInfos& vertex_buffer_infos, const FramebufferFormat& framebuffer_format, const BindGroupLayouts& bind_group_layouts,
-        const std::vector<std::optional<WGPUBlendState>>& blend_states = {});
+        const std::vector<std::optional<WGPUBlendState>>& blend_states = {}, const char* label = "generic render pipeline");
 
     const RenderPipeline& pipeline() const;
     const FramebufferFormat& framebuffer_format() const;
