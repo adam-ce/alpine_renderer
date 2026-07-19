@@ -22,8 +22,8 @@
 
 #include <QDateTime>
 #include <QDebug>
+#include <expected>
 #include <memory>
-#include <tl/expected.hpp>
 
 namespace webgpu_compute::nodes {
 
@@ -83,7 +83,7 @@ std::unordered_map<std::string, std::unique_ptr<Node>>& NodeGraph::get_nodes() {
 
 const std::unordered_map<std::string, std::unique_ptr<Node>>& NodeGraph::get_nodes() const { return m_nodes; }
 
-tl::expected<std::vector<Node*>, std::string> NodeGraph::compute_topological_order()
+std::expected<std::vector<Node*>, std::string> NodeGraph::compute_topological_order()
 {
     // basic idea: find topological ordering by counting in-coming edges (in-degree)
     //  1. start with nodes that have no incoming edges
@@ -96,7 +96,7 @@ tl::expected<std::vector<Node*>, std::string> NodeGraph::compute_topological_ord
     // known as https://en.wikipedia.org/wiki/Topological_sorting#Kahn's_algorithm
 
     if (m_nodes.empty())
-        return tl::unexpected(std::string("node graph is empty"));
+        return std::unexpected(std::string("node graph is empty"));
 
     std::unordered_map<Node*, uint32_t> in_degrees;
     std::queue<Node*> node_queue;
@@ -132,7 +132,7 @@ tl::expected<std::vector<Node*>, std::string> NodeGraph::compute_topological_ord
 
     for (auto& [node, in_degree] : in_degrees) {
         if (in_degree) {
-            return tl::unexpected(std::string("cycle in node graph detected"));
+            return std::unexpected(std::string("cycle in node graph detected"));
         }
     }
 

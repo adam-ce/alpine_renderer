@@ -55,8 +55,8 @@ void TextureLayer::draw(
     m_texture_array->bind(2);
     m_shader->set_uniform("texture_sampler", 2);
 
-    nucleus::Raster<uint8_t> zoom_level_raster = { glm::uvec2 { 1024, 1 } };
-    nucleus::Raster<uint16_t> array_index_raster = { glm::uvec2 { 1024, 1 } };
+    radix::Raster<uint8_t> zoom_level_raster(glm::uvec2 { 1024, 1 });
+    radix::Raster<uint16_t> array_index_raster(glm::uvec2 { 1024, 1 });
     for (unsigned i = 0; i < std::min(unsigned(draw_list.size()), 1024u); ++i) {
         const auto layer = m_gpu_array_helper.layer(draw_list[i].id);
         zoom_level_raster.pixel({ i, 0 }) = layer.id.zoom_level;

@@ -65,16 +65,13 @@ GpuArrayHelper::LayerInfo GpuArrayHelper::layer(Id tile_id) const
     return { tile_id, m_id_to_layer.at(tile_id) };
 }
 
-bool GpuArrayHelper::contains(Id tile_id) const
-{
-    return m_id_to_layer.contains(tile_id);
-}
+bool GpuArrayHelper::contains(Id tile_id) const { return m_id_to_layer.contains(tile_id); }
 
 GpuArrayHelper::Dictionary GpuArrayHelper::generate_dictionary() const
 {
     const auto hash_to_pixel = [](uint16_t hash) { return glm::uvec2(hash & 255, hash >> 8); };
-    nucleus::Raster<glm::u32vec2> packed_ids({ 256, 256 }, glm::u32vec2(-1, -1));
-    nucleus::Raster<uint16_t> layers({ 256, 256 }, 0);
+    radix::Raster<glm::u32vec2> packed_ids({ 256, 256 }, glm::u32vec2(-1, -1));
+    radix::Raster<uint16_t> layers({ 256, 256 }, 0);
     for (const auto& [id, layer] : m_id_to_layer) {
         auto hash = nucleus::srs::hash_uint16(id);
         while (packed_ids.pixel(hash_to_pixel(hash)) != glm::u32vec2(-1, -1))

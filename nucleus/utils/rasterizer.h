@@ -504,7 +504,7 @@ std::vector<glm::vec2> triangulize(std::vector<glm::vec2> polygon_points, std::v
  *
  * example usage:
  *      const std::vector<glm::vec2> triangle_points = { glm::vec2(30.5, 10.5), glm::vec2(10.5, 30.5), glm::vec2(50.5, 50.5) };
- *      nucleus::Raster<uint8_t> output({ 64, 64 }, 0u);
+ *      radix::Raster<uint8_t> output({ 64, 64 }, 0u);
  *      const auto pixel_writer = [&output](glm::ivec2 pos) { output.pixel(pos) = 255; };
  *      nucleus::utils::rasterizer::rasterize_triangle(pixel_writer, triangle_points);
  */
@@ -525,7 +525,7 @@ template <PixelWriterFunctionConcept PixelWriterFunction> void rasterize_triangl
  *
  * example usage:
  *      const std::vector<glm::vec2> line = { glm::vec2(30.5, 10.5), glm::vec2(50.5, 30.5), glm::vec2(30.5, 50.5), glm::vec2(10.5, 30.5), glm::vec2(30.5, 10.5) };
- *      nucleus::Raster<uint8_t> output({ 64, 64 }, 0u);
+ *      radix::Raster<uint8_t> output({ 64, 64 }, 0u);
  *      const auto pixel_writer = [&output](glm::ivec2 pos) { output.pixel(pos) = 255; };
  *      nucleus::utils::rasterizer::rasterize_line(pixel_writer, line);
  */
@@ -543,7 +543,7 @@ template <PixelWriterFunctionConcept PixelWriterFunction> void rasterize_line(co
  *
  * example usage:
  *      const std::vector<glm::vec2> polygon_points = { glm::vec2(30.5, 10.5), glm::vec2(10.5, 30.5), glm::vec2(50.5, 50.5) };
- *      nucleus::Raster<uint8_t> output({ 64, 64 }, 0u);
+ *      radix::Raster<uint8_t> output({ 64, 64 }, 0u);
  *      const auto pixel_writer = [&output](glm::ivec2 pos) { output.pixel(pos) = 255; };
  *      nucleus::utils::rasterizer::rasterize_polygon(pixel_writer, polygon_points);
  */
