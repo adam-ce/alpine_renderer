@@ -26,7 +26,7 @@
 
 namespace nucleus::utils::image_writer {
 
-void rgba8_as_png(const Raster<glm::u8vec4>& data, const QString& filename)
+void rgba8_as_png(const radix::Raster<glm::u8vec4>& data, const QString& filename)
 {
     assert(data.width() > 0);
     assert(data.height() > 0);

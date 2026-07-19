@@ -27,7 +27,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
-#include <extern/tl_expected/include/tl/expected.hpp>
+#include <expected>
 #include <iostream>
 
 namespace nucleus::avalanche {

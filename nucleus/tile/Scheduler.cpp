@@ -188,11 +188,11 @@ void Scheduler::purge_ram_cache()
     emit stats_ready(m_name, stats);
 }
 
-tl::expected<void, QString> Scheduler::persist_tiles()
+std::expected<void, QString> Scheduler::persist_tiles()
 {
     if (m_name == "unnamed" || m_name.isEmpty()) {
-        return tl::unexpected(QString("Not persisitng tiles as the scheduler is not named, and this would cause name conflicts in the file system."
-                                      "Name your scheduler, e.g., by using the scheduler director."));
+        return std::unexpected(QString("Not persisitng tiles as the scheduler is not named, and this would cause name conflicts in the file system."
+                                       "Name your scheduler, e.g., by using the scheduler director."));
     }
     const auto start = std::chrono::steady_clock::now();
     const auto r = m_ram_cache.write_to_disk(disk_cache_path());
@@ -204,7 +204,8 @@ tl::expected<void, QString> Scheduler::persist_tiles()
                         .arg(m_ram_cache.n_cached_objects());
 
     if (!r.has_value()) {
-        qDebug() << QString("Writing tiles to disk into %1 failed: %2. Removing all files.").arg(QString::fromStdString(disk_cache_path().string())).arg(r.error());
+        qDebug()
+            << QString("Writing tiles to disk into %1 failed: %2. Removing all files.").arg(QString::fromStdString(disk_cache_path().string())).arg(r.error());
         std::filesystem::remove_all(disk_cache_path());
     }
     return r;
@@ -254,13 +255,13 @@ void Scheduler::clear_full_cache()
     set_ram_quad_limit(old_ram_quad_limit);
 }
 
-tl::expected<void, QString> Scheduler::read_disk_cache()
+std::expected<void, QString> Scheduler::read_disk_cache()
 {
     if (m_name == "unnamed" || m_name.isEmpty()) {
         const auto error = QString("Not reading tiles as the scheduler is not named, and this would cause name conflicts in the file system."
                                    "Name your scheduler, e.g., by using the scheduler director.");
         qDebug() << error;
-        return tl::unexpected(error);
+        return std::unexpected(error);
     }
     const auto r = m_ram_cache.read_from_disk(disk_cache_path());
     if (r.has_value()) {
@@ -269,7 +270,9 @@ tl::expected<void, QString> Scheduler::read_disk_cache()
         stats["n_quads_ram_max"] = m.ram_quad_limit;
         emit stats_ready(m_name, stats);
     } else {
-        qDebug() << QString("Reading tiles from disk cache (%1) failed: \n%2\nRemoving all files.").arg(QString::fromStdString(disk_cache_path().string())).arg(r.error());
+        qDebug() << QString("Reading tiles from disk cache (%1) failed: \n%2\nRemoving all files.")
+                        .arg(QString::fromStdString(disk_cache_path().string()))
+                        .arg(r.error());
         std::filesystem::remove_all(disk_cache_path());
     }
     return r;
@@ -345,15 +348,9 @@ void Scheduler::set_ram_quad_limit(unsigned int new_ram_quad_limit) { m.ram_quad
 
 void Scheduler::set_gpu_quad_limit(unsigned int new_gpu_quad_limit) { m.gpu_quad_limit = new_gpu_quad_limit; }
 
-void Scheduler::set_aabb_decorator(const utils::AabbDecoratorPtr& new_aabb_decorator)
-{
-    m_aabb_decorator = new_aabb_decorator;
-}
+void Scheduler::set_aabb_decorator(const utils::AabbDecoratorPtr& new_aabb_decorator) { m_aabb_decorator = new_aabb_decorator; }
 
-bool Scheduler::enabled() const
-{
-    return m_enabled;
-}
+bool Scheduler::enabled() const { return m_enabled; }
 
 void Scheduler::set_enabled(bool new_enabled)
 {

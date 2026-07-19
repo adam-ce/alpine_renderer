@@ -234,7 +234,7 @@ void Texture::save_to_file(WGPUDevice device, const std::string& filename, size_
         case WGPUTextureFormat::WGPUTextureFormat_R32Float: {
             const float* float_data = reinterpret_cast<const float*>(data->data());
             const size_t num_floats = data->size() / sizeof(float);
-            nucleus::Raster<float> raster(glm::uvec2(width(), height()));
+            radix::Raster<float> raster(glm::uvec2(width(), height()));
             std::copy(float_data, float_data + num_floats, raster.buffer().data());
             nucleus::utils::geopng::write_encoded_float_png(raster, QString::fromStdString(filename));
         } break;

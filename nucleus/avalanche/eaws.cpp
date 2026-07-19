@@ -32,7 +32,7 @@
 
 namespace nucleus::avalanche {
 
-tl::expected<RegionTile, QString> vector_tile_reader(const QByteArray& input_data, const radix::tile::Id& tile_id)
+std::expected<RegionTile, QString> vector_tile_reader(const QByteArray& input_data, const radix::tile::Id& tile_id)
 {
     // This name could theoretically be changed by the EAWS (very unlikely though)
     const QString& name_of_layer_with_eaws_regions = "micro-regions";
@@ -44,7 +44,7 @@ tl::expected<RegionTile, QString> vector_tile_reader(const QByteArray& input_dat
     if (!layers.contains(name_of_layer_with_eaws_regions.toStdString())) {
         QString error_message
             = "ERROR in vector_tile::reader::eaws_region: The vector tile contains no layer with name " + name_of_layer_with_eaws_regions + ".";
-        return tl::unexpected(error_message);
+        return std::unexpected(error_message);
     }
 
     // Get the relevant layer and check if it contains data
@@ -52,13 +52,13 @@ tl::expected<RegionTile, QString> vector_tile_reader(const QByteArray& input_dat
     if (layer.featureCount() <= 0) {
         QString error_message = "ERROR in vector_tile::reader::eaws_region: The vector tile contains no EAWS micro-regions in the layer \""
             + name_of_layer_with_eaws_regions + "\".";
-        return tl::unexpected(error_message);
+        return std::unexpected(error_message);
     }
 
     // Ensure extend > 0. Extend is an integer representing the resolution of the square tile. Usually the extend is 4096
     if (layer.getExtent() <= 0) {
         QString error_message = "ERROR in vector_tile::reader::eaws_region: Vector tile has extend <= 0.";
-        return tl::unexpected(error_message);
+        return std::unexpected(error_message);
     }
     uint extent = layer.getExtent();
 
@@ -95,7 +95,7 @@ tl::expected<RegionTile, QString> vector_tile_reader(const QByteArray& input_dat
     }
 
     // Combine all regions with their tile id and return this pair
-    return tl::expected<RegionTile, QString>(RegionTile(tile_id, regions_to_be_returned));
+    return std::expected<RegionTile, QString>(RegionTile(tile_id, regions_to_be_returned));
 }
 
 // Auxillary function: Calculates new coordinates of a region boundary after zoom in / out
@@ -203,7 +203,7 @@ QImage draw_regions(const RegionTile& region_tile,
     return img;
 }
 
-nucleus::Raster<uint16_t> rasterize_regions(const RegionTile& region_tile,
+radix::Raster<uint16_t> rasterize_regions(const RegionTile& region_tile,
     std::shared_ptr<UIntIdManager> internal_id_manager,
     const uint raster_width,
     const uint raster_height,
@@ -215,7 +215,7 @@ nucleus::Raster<uint16_t> rasterize_regions(const RegionTile& region_tile,
     return raster;
 }
 
-nucleus::Raster<uint16_t> rasterize_regions(const RegionTile& region_tile, std::shared_ptr<UIntIdManager> internal_id_manager)
+radix::Raster<uint16_t> rasterize_regions(const RegionTile& region_tile, std::shared_ptr<UIntIdManager> internal_id_manager)
 {
     return rasterize_regions(region_tile, internal_id_manager, region_tile.second[0].resolution.x, region_tile.second[0].resolution.y, region_tile.first);
 }

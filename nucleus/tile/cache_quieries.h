@@ -27,7 +27,7 @@
 
 namespace nucleus::tile::cache_queries {
 
-inline tl::expected<float, QString> query_altitude(MemoryCache* cache, const glm::dvec2& lat_long)
+inline std::expected<float, QString> query_altitude(MemoryCache* cache, const glm::dvec2& lat_long)
 {
     const auto world_space = srs::lat_long_to_world(lat_long);
     nucleus::tile::Data selected_tile;
@@ -41,7 +41,7 @@ inline tl::expected<float, QString> query_altitude(MemoryCache* cache, const glm
         return false;
     });
     if (!selected_tile.data)
-        return tl::unexpected(QString("Couldn't find altitude for %1/%2").arg(lat_long.x).arg(lat_long.y));
+        return std::unexpected(QString("Couldn't find altitude for %1/%2").arg(lat_long.x).arg(lat_long.y));
     assert(selected_tile.data->size());
 
     const auto bounds = srs::tile_bounds(selected_tile.id);
@@ -56,7 +56,7 @@ inline tl::expected<float, QString> query_altitude(MemoryCache* cache, const glm
         }
     }
     assert(false);
-    return tl::unexpected(QString("Couldn't find altitude for %1/%2").arg(lat_long.x).arg(lat_long.y));
+    return std::unexpected(QString("Couldn't find altitude for %1/%2").arg(lat_long.x).arg(lat_long.y));
 }
 
 } // namespace nucleus::tile::cache_queries

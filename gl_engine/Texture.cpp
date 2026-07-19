@@ -202,7 +202,7 @@ void gl_engine::Texture::upload(const nucleus::utils::MipmappedColourTexture& mi
     }
 }
 
-template <typename T> void gl_engine::Texture::upload(const nucleus::Raster<T>& texture, unsigned int array_index)
+template <typename T> void gl_engine::Texture::upload(const radix::Raster<T>& texture, unsigned int array_index)
 {
     assert(m_target == Target::_2dArray);
 
@@ -224,21 +224,21 @@ template <typename T> void gl_engine::Texture::upload(const nucleus::Raster<T>& 
     auto* f = QOpenGLContext::currentContext()->extraFunctions();
     f->glBindTexture(GLenum(m_target), m_id);
     f->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    f->glTexSubImage3D(GLenum(m_target), 0, 0, 0, GLint(array_index), width, height, 1, p.format, p.type, texture.bytes());
+    f->glTexSubImage3D(GLenum(m_target), 0, 0, 0, GLint(array_index), width, height, 1, p.format, p.type, texture.bytes().data());
 
     if (m_min_filter == Filter::MipMapLinear)
         f->glGenerateMipmap(GLenum(m_target));
 }
-template void gl_engine::Texture::upload<uint8_t>(const nucleus::Raster<uint8_t>&, unsigned);
-template void gl_engine::Texture::upload<uint16_t>(const nucleus::Raster<uint16_t>&, unsigned);
-template void gl_engine::Texture::upload<uint32_t>(const nucleus::Raster<uint32_t>&, unsigned);
-template void gl_engine::Texture::upload<glm::vec<2, uint8_t>>(const nucleus::Raster<glm::vec<2, uint8_t>>&, unsigned);
-template void gl_engine::Texture::upload<glm::vec<2, uint32_t>>(const nucleus::Raster<glm::vec<2, uint32_t>>&, unsigned);
-template void gl_engine::Texture::upload<glm::vec<3, uint32_t>>(const nucleus::Raster<glm::vec<3, uint32_t>>&, unsigned);
-template void gl_engine::Texture::upload<glm::vec<4, uint8_t>>(const nucleus::Raster<glm::vec<4, uint8_t>>&, unsigned);
-template void gl_engine::Texture::upload<glm::vec<4, float>>(const nucleus::Raster<glm::vec<4, float>>&, unsigned);
+template void gl_engine::Texture::upload<uint8_t>(const radix::Raster<uint8_t>&, unsigned);
+template void gl_engine::Texture::upload<uint16_t>(const radix::Raster<uint16_t>&, unsigned);
+template void gl_engine::Texture::upload<uint32_t>(const radix::Raster<uint32_t>&, unsigned);
+template void gl_engine::Texture::upload<glm::vec<2, uint8_t>>(const radix::Raster<glm::vec<2, uint8_t>>&, unsigned);
+template void gl_engine::Texture::upload<glm::vec<2, uint32_t>>(const radix::Raster<glm::vec<2, uint32_t>>&, unsigned);
+template void gl_engine::Texture::upload<glm::vec<3, uint32_t>>(const radix::Raster<glm::vec<3, uint32_t>>&, unsigned);
+template void gl_engine::Texture::upload<glm::vec<4, uint8_t>>(const radix::Raster<glm::vec<4, uint8_t>>&, unsigned);
+template void gl_engine::Texture::upload<glm::vec<4, float>>(const radix::Raster<glm::vec<4, float>>&, unsigned);
 
-template <typename T> void gl_engine::Texture::upload(const nucleus::Raster<T>& texture)
+template <typename T> void gl_engine::Texture::upload(const radix::Raster<T>& texture)
 {
     assert(m_target == Target::_2d);
 
@@ -254,19 +254,19 @@ template <typename T> void gl_engine::Texture::upload(const nucleus::Raster<T>& 
     QOpenGLExtraFunctions* f = QOpenGLContext::currentContext()->extraFunctions();
     f->glBindTexture(GLenum(m_target), m_id);
     f->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    f->glTexImage2D(GLenum(m_target), 0, p.internal_format, GLsizei(texture.width()), GLsizei(texture.height()), 0, p.format, p.type, texture.bytes());
+    f->glTexImage2D(GLenum(m_target), 0, p.internal_format, GLsizei(texture.width()), GLsizei(texture.height()), 0, p.format, p.type, texture.bytes().data());
 
     if (m_min_filter == Filter::MipMapLinear)
         f->glGenerateMipmap(GLenum(m_target));
 }
-template void gl_engine::Texture::upload<uint8_t>(const nucleus::Raster<uint8_t>&);
-template void gl_engine::Texture::upload<uint16_t>(const nucleus::Raster<uint16_t>&);
-template void gl_engine::Texture::upload<uint32_t>(const nucleus::Raster<uint32_t>&);
-template void gl_engine::Texture::upload<glm::vec<2, uint32_t>>(const nucleus::Raster<glm::vec<2, uint32_t>>&);
-template void gl_engine::Texture::upload<glm::vec<3, uint32_t>>(const nucleus::Raster<glm::vec<3, uint32_t>>&);
-template void gl_engine::Texture::upload<glm::vec<2, uint8_t>>(const nucleus::Raster<glm::vec<2, uint8_t>>&);
-template void gl_engine::Texture::upload<glm::vec<4, uint8_t>>(const nucleus::Raster<glm::vec<4, uint8_t>>&);
-template void gl_engine::Texture::upload<glm::vec<4, float>>(const nucleus::Raster<glm::vec<4, float>>&);
+template void gl_engine::Texture::upload<uint8_t>(const radix::Raster<uint8_t>&);
+template void gl_engine::Texture::upload<uint16_t>(const radix::Raster<uint16_t>&);
+template void gl_engine::Texture::upload<uint32_t>(const radix::Raster<uint32_t>&);
+template void gl_engine::Texture::upload<glm::vec<2, uint32_t>>(const radix::Raster<glm::vec<2, uint32_t>>&);
+template void gl_engine::Texture::upload<glm::vec<3, uint32_t>>(const radix::Raster<glm::vec<3, uint32_t>>&);
+template void gl_engine::Texture::upload<glm::vec<2, uint8_t>>(const radix::Raster<glm::vec<2, uint8_t>>&);
+template void gl_engine::Texture::upload<glm::vec<4, uint8_t>>(const radix::Raster<glm::vec<4, uint8_t>>&);
+template void gl_engine::Texture::upload<glm::vec<4, float>>(const radix::Raster<glm::vec<4, float>>&);
 
 GLenum gl_engine::Texture::compressed_texture_format()
 {

@@ -27,18 +27,16 @@
 #define GOOFYTC_IMPLEMENTATION
 #include <GoofyTC/goofy_tc.h>
 
-
 namespace {
 
-std::vector<uint8_t> to_dxt1(const nucleus::Raster<glm::u8vec4>& image)
+std::vector<uint8_t> to_dxt1(const radix::Raster<glm::u8vec4>& image)
 {
     assert(image.width() == image.height());
     assert(image.width() % 16 == 0);
     assert(image.size_per_line() * image.height() == image.width() * image.height() * 4);
     assert(image.size_in_bytes() == image.width() * image.height() * 4);
 
-    struct alignas(16) AlignedBlock
-    {
+    struct alignas(16) AlignedBlock {
         std::array<uint8_t, 16> data;
     };
     static_assert(sizeof(AlignedBlock) == 16);
@@ -49,7 +47,7 @@ std::vector<uint8_t> to_dxt1(const nucleus::Raster<glm::u8vec4>& image)
 
     auto aligned_in = std::vector<AlignedBlock>(n_bytes_in / sizeof(AlignedBlock));
     auto data_ptr = reinterpret_cast<uint8_t*>(aligned_in.data());
-    std::copy(image.bytes(), image.bytes() + n_bytes_in, data_ptr);
+    std::ranges::copy(image.bytes(), reinterpret_cast<std::byte*>(data_ptr));
 
     std::vector<uint8_t> compressed(n_bytes_out);
     const auto result = goofy::compressDXT1(compressed.data(), data_ptr, (uint32_t)image.width(), (uint32_t)image.height(), (uint32_t)image.width() * 4);
@@ -59,15 +57,14 @@ std::vector<uint8_t> to_dxt1(const nucleus::Raster<glm::u8vec4>& image)
     return compressed;
 }
 
-std::vector<uint8_t> to_etc1(const nucleus::Raster<glm::u8vec4>& image)
+std::vector<uint8_t> to_etc1(const radix::Raster<glm::u8vec4>& image)
 {
     assert(image.width() == image.height());
     assert(image.width() % 16 == 0);
     assert(image.size_per_line() * image.height() == image.width() * image.height() * 4);
     assert(image.size_in_bytes() == image.width() * image.height() * 4);
 
-    struct alignas(16) AlignedBlock
-    {
+    struct alignas(16) AlignedBlock {
         std::array<uint8_t, 16> data;
     };
     static_assert(sizeof(AlignedBlock) == 16);
@@ -78,7 +75,7 @@ std::vector<uint8_t> to_etc1(const nucleus::Raster<glm::u8vec4>& image)
 
     auto aligned_in = std::vector<AlignedBlock>(n_bytes_in / sizeof(AlignedBlock));
     auto data_ptr = reinterpret_cast<uint8_t*>(aligned_in.data());
-    std::copy(image.bytes(), image.bytes() + n_bytes_in, data_ptr);
+    std::ranges::copy(image.bytes(), reinterpret_cast<std::byte*>(data_ptr));
 
     std::vector<uint8_t> compressed(n_bytes_out);
     const auto result = goofy::compressETC1(compressed.data(), data_ptr, (uint32_t)image.width(), (uint32_t)image.height(), (uint32_t)image.width() * 4);
@@ -88,19 +85,23 @@ std::vector<uint8_t> to_etc1(const nucleus::Raster<glm::u8vec4>& image)
     return compressed;
 }
 
-std::vector<uint8_t> to_uncompressed_rgba(const nucleus::Raster<glm::u8vec4>& image)
+std::vector<uint8_t> to_uncompressed_rgba(const radix::Raster<glm::u8vec4>& image)
 {
     size_t size_in_bytes = image.size_in_bytes();
     assert(size_in_bytes == (size_t)image.width() * image.height() * 4);
     std::vector<uint8_t> data(size_in_bytes);
     // Note: AND Another copy... We copy the data two times (once in stb_image_loader.cpp)
-    std::copy(image.bytes(), image.bytes() + image.size_in_bytes(), data.data());
+    std::ranges::copy(image.bytes(), reinterpret_cast<std::byte*>(data.data()));
     return data;
 }
 
-std::vector<uint8_t> to_compressed(const nucleus::Raster<glm::u8vec4>& image, nucleus::utils::ColourTexture::Format algorithm)
+std::vector<uint8_t> to_compressed(const radix::Raster<glm::u8vec4>& image, nucleus::utils::ColourTexture::Format algorithm)
 {
     using Algorithm = nucleus::utils::ColourTexture::Format;
+    if (image.buffer().empty()) {
+        assert(false && "Cannot encode an empty colour raster");
+        return {};
+    }
     assert(image.width() == image.height());
     assert(image.width() % 4 == 0 || image.width() == 2 || image.width() == 1);
 
@@ -115,7 +116,7 @@ std::vector<uint8_t> to_compressed(const nucleus::Raster<glm::u8vec4>& image, nu
             avg += glm::u32vec4(c);
         }
         avg /= image.buffer_length();
-        auto v = to_dxt1(nucleus::resize(image, { 16, 16 }, glm::u8vec4(avg)));
+        auto v = to_dxt1(radix::raster::resize(image, { 16, 16 }, glm::u8vec4(avg)));
         if (image.width() == 8) {
             for (auto i = 16u; i < 32; ++i)
                 v[i] = v[i + 16u];
@@ -133,7 +134,7 @@ std::vector<uint8_t> to_compressed(const nucleus::Raster<glm::u8vec4>& image, nu
             avg += glm::u32vec4(c);
         }
         avg /= image.buffer_length();
-        auto v = to_etc1(nucleus::resize(image, { 16, 16 }, glm::u8vec4(avg)));
+        auto v = to_etc1(radix::raster::resize(image, { 16, 16 }, glm::u8vec4(avg)));
         if (image.width() == 8) {
             for (auto i = 16u; i < 32; ++i)
                 v[i] = v[i + 16u];
@@ -144,11 +145,12 @@ std::vector<uint8_t> to_compressed(const nucleus::Raster<glm::u8vec4>& image, nu
         return v;
     }
     }
-    throw std::runtime_error("Unsupported algorithm for nucleus::Raster<glm::u8vec4>");
+    assert(false && "Unsupported colour texture format");
+    return {};
 }
 } // namespace
 
-nucleus::utils::ColourTexture::ColourTexture(const nucleus::Raster<glm::u8vec4>& image, Format format)
+nucleus::utils::ColourTexture::ColourTexture(const radix::Raster<glm::u8vec4>& image, Format format)
     : m_data(to_compressed(image, format))
     , m_width(unsigned(image.width()))
     , m_height(unsigned(image.height()))
@@ -157,9 +159,14 @@ nucleus::utils::ColourTexture::ColourTexture(const nucleus::Raster<glm::u8vec4>&
 }
 
 nucleus::utils::MipmappedColourTexture nucleus::utils::generate_mipmapped_colour_texture(
-    const nucleus::Raster<glm::u8vec4>& texture, ColourTexture::Format format)
+    const radix::Raster<glm::u8vec4>& texture, ColourTexture::Format format)
 {
-    auto mip_levels = nucleus::generate_mipmap(texture);
+    auto mip_levels_result = radix::raster::generate_mipmap(texture);
+    if (!mip_levels_result) {
+        assert(false && "Colour textures require square, power-of-two rasters");
+        return {};
+    }
+    auto mip_levels = std::move(*mip_levels_result);
     nucleus::utils::MipmappedColourTexture colour_texture = {};
     for (const auto& level : mip_levels) {
         colour_texture.emplace_back(level, format);
