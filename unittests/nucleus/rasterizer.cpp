@@ -25,7 +25,8 @@
 
 #include <CDT.h>
 
-#include <algorithm>\n#include <radix/raster.h>
+#include <algorithm>
+#include <radix/raster.h>
 #include "nucleus/tile/conversion.h"
 #include "nucleus/utils/rasterizer.h"
 
