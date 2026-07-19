@@ -22,6 +22,7 @@
 
 #include <QDateTime>
 #include <QDebug>
+#include <QtAssert>
 #include <expected>
 #include <memory>
 
@@ -39,7 +40,7 @@ const NodeRunFailureInfo& GraphRunFailureInfo::node_run_failure_info() const { r
 
 Node* NodeGraph::add_node(const std::string& name, std::unique_ptr<Node> node)
 {
-    assert(!m_nodes.contains(name));
+    Q_ASSERT(!m_nodes.contains(name));
     node->set_node_name(name);
     m_nodes.emplace(name, std::move(node));
     return m_nodes.at(name).get();
@@ -48,7 +49,7 @@ Node* NodeGraph::add_node(const std::string& name, std::unique_ptr<Node> node)
 void NodeGraph::remove_node(const std::string& name)
 {
     auto it = m_nodes.find(name);
-    assert(it != m_nodes.end());
+    Q_ASSERT(it != m_nodes.end());
     Node* node = it->second.get();
 
     for (auto& socket : node->input_sockets())
@@ -65,8 +66,8 @@ void NodeGraph::remove_node(const std::string& name)
 
 void NodeGraph::rename_node(const std::string& old_name, const std::string& new_name)
 {
-    assert(m_nodes.contains(old_name));
-    assert(!m_nodes.contains(new_name));
+    Q_ASSERT(m_nodes.contains(old_name));
+    Q_ASSERT(!m_nodes.contains(new_name));
     auto node = std::move(m_nodes.at(old_name));
     m_nodes.erase(old_name);
     node->set_node_name(new_name);
@@ -177,7 +178,7 @@ void NodeGraph::run()
 void NodeGraph::emit_graph_failure(NodeRunFailureInfo info)
 {
     auto it = std::find_if(m_nodes.begin(), m_nodes.end(), [&info](const auto& key_value_pair) { return key_value_pair.second.get() == &info.node(); });
-    assert(it != m_nodes.end());
+    Q_ASSERT(it != m_nodes.end());
     emit run_failed(GraphRunFailureInfo(it->first, info));
 }
 

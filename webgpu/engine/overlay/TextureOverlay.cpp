@@ -20,6 +20,8 @@
 #include "TextureOverlay.h"
 
 #include "webgpu/engine/Context.h"
+#include <QtAssert>
+
 #include <nucleus/utils/geopng_decoder.h>
 #include <nucleus/utils/image_loader.h>
 #include <optional>
@@ -40,7 +42,7 @@ TextureOverlay::TextureOverlay()
 
 void TextureOverlay::load_image(const QString& path)
 {
-    assert(m_is_ready && "load_image must be called after ready()");
+    Q_ASSERT(m_is_ready && "load_image must be called after ready()");
     m_linked_texture = nullptr; // owned source takes over
     const auto image = nucleus::utils::image_loader::rgba8(path).value();
     create_texture(*m_ctx, uint32_t(image.width()), uint32_t(image.height()));
@@ -53,8 +55,8 @@ void TextureOverlay::link_texture(const webgpu::raii::TextureWithSampler* textur
 
 void TextureOverlay::load_texture(const webgpu::raii::TextureWithSampler& source)
 {
-    assert(m_is_ready && "load_texture must be called after ready()");
-    assert(source.texture().descriptor().format == WGPUTextureFormat_RGBA8Unorm && "load_texture requires an RGBA8Unorm source texture");
+    Q_ASSERT(m_is_ready && "load_texture must be called after ready()");
+    Q_ASSERT(source.texture().descriptor().format == WGPUTextureFormat_RGBA8Unorm && "load_texture requires an RGBA8Unorm source texture");
 
     m_linked_texture = nullptr; // owned source takes over
     create_texture(*m_ctx, uint32_t(source.texture().width()), uint32_t(source.texture().height()));
@@ -194,7 +196,7 @@ void TextureOverlay::draw(const WGPUCommandEncoder& command_encoder,
     glm::uvec2 /*output_size*/)
 {
     const webgpu::raii::TextureWithSampler* tex = m_linked_texture ? m_linked_texture : m_overlay_texture.get();
-    assert(tex && m_pipeline);
+    Q_ASSERT(tex && m_pipeline);
 
     webgpu::raii::BindGroup bind_group(m_ctx->device(),
         m_ctx->resource_registry().bind_group_layout("texture_overlay"),

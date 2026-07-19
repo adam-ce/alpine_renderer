@@ -21,6 +21,7 @@
 
 #include <QDebug>
 #include <QString>
+#include <QtAssert>
 #include <nucleus/srs.h>
 #include <nucleus/utils/image_loader.h>
 #include <nucleus/utils/image_writer.h>
@@ -51,7 +52,7 @@ void TileStitchNode::run_impl()
     // get tile ids to process
     const auto& tile_ids = *std::get<data_type<const std::vector<radix::tile::Id>*>()>(input_socket("tile ids").get_connected_data());
     const auto& textures = *std::get<data_type<const std::vector<QByteArray>*>()>(input_socket("texture data").get_connected_data());
-    assert(tile_ids.size() == textures.size());
+    Q_ASSERT(tile_ids.size() == textures.size());
 
     // The original tile size is as configured in the settings
     glm::uvec2 so = m_settings.tile_size;
@@ -131,7 +132,7 @@ void TileStitchNode::run_impl()
         // Load image (NOTE: Only supports u8vec4 so far)
         images[i] = nucleus::utils::image_loader::rgba8(texture_data).value();
         const auto& image = images[i];
-        assert(image.width() == so.x && image.height() == so.y);
+        Q_ASSERT(image.width() == so.x && image.height() == so.y);
 
         WGPUTexelCopyTextureInfo image_copy_texture {};
         image_copy_texture.texture = tex.handle();

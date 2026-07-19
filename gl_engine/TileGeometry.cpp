@@ -26,6 +26,7 @@
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLVertexArrayObject>
+#include <QtAssert>
 #include <nucleus/camera/Definition.h>
 #include <nucleus/utils/terrain_mesh_index_generator.h>
 
@@ -44,7 +45,7 @@ void TileGeometry::init()
 {
 
     using nucleus::utils::terrain_mesh_index_generator::surface_quads_with_curtains;
-    assert(QOpenGLContext::currentContext());
+    Q_ASSERT(QOpenGLContext::currentContext());
     const auto indices = surface_quads_with_curtains<uint16_t>(m_texture_resolution);
     auto index_buffer = std::make_unique<QOpenGLBuffer>(QOpenGLBuffer::IndexBuffer);
     index_buffer->create();
@@ -186,7 +187,7 @@ void TileGeometry::set_aabb_decorator(const nucleus::tile::utils::AabbDecoratorP
 
 void TileGeometry::set_tile_limit(unsigned int new_limit)
 {
-    assert(!m_dtm_textures);
+    Q_ASSERT(!m_dtm_textures);
     m_gpu_array_helper.set_tile_limit(new_limit);
 }
 
@@ -203,8 +204,8 @@ void TileGeometry::update_gpu_tiles(const std::vector<radix::tile::Id>& deleted_
     }
     for (const auto& tile : new_tiles) {
         // test for validity
-        assert(tile.id.zoom_level < 100);
-        assert(tile.surface);
+        Q_ASSERT(tile.id.zoom_level < 100);
+        Q_ASSERT(tile.surface);
 
         // find empty spot and upload texture
         const auto layer_index = m_gpu_array_helper.add_tile(tile.id);

@@ -17,6 +17,7 @@
  *****************************************************************************/
 
 #include <QPainter>
+#include <QtAssert>
 #include <catch2/catch_test_macros.hpp>
 
 #include "UnittestGLContext.h"
@@ -100,7 +101,7 @@ void test_unsigned_texture_with(const TexelType& texel_value, gl_engine::Texture
             return "mediump";
         if (sizeof(Type) == 4)
             return "highp";
-        assert(false);
+        Q_ASSERT(false);
         return "Type has unexpected size";
     };
 
@@ -197,7 +198,7 @@ void test_unsigned_texture_array_with(const std::array<TexelType, 2>& texel_valu
             return "mediump";
         if (sizeof(Type) == 4)
             return "highp";
-        assert(false);
+        Q_ASSERT(false);
         return "Type has unexpected size";
     };
 

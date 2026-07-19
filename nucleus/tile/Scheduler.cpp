@@ -26,6 +26,7 @@
 #include <QStandardPaths>
 #include <QTimer>
 #include <QVariantMap>
+#include <QtAssert>
 #include <nucleus/DataQuerier.h>
 #include <nucleus/tile/utils.h>
 #include <radix/quad_tree.h>
@@ -140,7 +141,7 @@ void Scheduler::update_gpu_quads()
     m_gpu_cached.visit([&should_refine](const GpuCacheInfo& quad) { return should_refine(quad.id); });
 
     const auto superfluous_quads = m_gpu_cached.purge(m.gpu_quad_limit);
-    assert(m_gpu_cached.n_cached_objects() <= m.gpu_quad_limit);
+    Q_ASSERT(m_gpu_cached.n_cached_objects() <= m.gpu_quad_limit);
 
     // elimitate double entries (happens when the gpu has not enough space for all quads selected above)
     std::unordered_set<tile::Id, tile::Id::Hasher> superfluous_ids;
@@ -213,14 +214,14 @@ std::expected<void, QString> Scheduler::persist_tiles()
 
 void Scheduler::schedule_update()
 {
-    assert(m.update_timeout < unsigned(std::numeric_limits<int>::max()));
+    Q_ASSERT(m.update_timeout < unsigned(std::numeric_limits<int>::max()));
     if (m_enabled && !m_update_timer->isActive())
         m_update_timer->start(int(m.update_timeout));
 }
 
 void Scheduler::schedule_purge()
 {
-    assert(m.purge_timeout < unsigned(std::numeric_limits<int>::max()));
+    Q_ASSERT(m.purge_timeout < unsigned(std::numeric_limits<int>::max()));
     if (m_enabled && !m_purge_timer->isActive()) {
         m_purge_timer->start(int(m.purge_timeout));
     }
@@ -228,7 +229,7 @@ void Scheduler::schedule_purge()
 
 void Scheduler::schedule_persist()
 {
-    assert(m.persist_timeout < unsigned(std::numeric_limits<int>::max()));
+    Q_ASSERT(m.persist_timeout < unsigned(std::numeric_limits<int>::max()));
     if (!m_persist_timer->isActive()) {
         m_persist_timer->start(int(m.persist_timeout));
     }
@@ -315,7 +316,7 @@ unsigned int Scheduler::persist_timeout() const { return m.persist_timeout; }
 
 void Scheduler::set_persist_timeout(unsigned int new_persist_timeout)
 {
-    assert(new_persist_timeout < unsigned(std::numeric_limits<int>::max()));
+    Q_ASSERT(new_persist_timeout < unsigned(std::numeric_limits<int>::max()));
     m.persist_timeout = new_persist_timeout;
 
     if (m_persist_timer->isActive()) {
@@ -336,7 +337,7 @@ std::filesystem::path Scheduler::disk_cache_path()
 
 void Scheduler::set_purge_timeout(unsigned int new_purge_timeout)
 {
-    assert(new_purge_timeout < unsigned(std::numeric_limits<int>::max()));
+    Q_ASSERT(new_purge_timeout < unsigned(std::numeric_limits<int>::max()));
     m.purge_timeout = new_purge_timeout;
 
     if (m_purge_timer->isActive()) {
@@ -360,7 +361,7 @@ void Scheduler::set_enabled(bool new_enabled)
 
 void Scheduler::set_update_timeout(unsigned new_update_timeout)
 {
-    assert(m.update_timeout < unsigned(std::numeric_limits<int>::max()));
+    Q_ASSERT(m.update_timeout < unsigned(std::numeric_limits<int>::max()));
     m.update_timeout = new_update_timeout;
     if (m_update_timer->isActive()) {
         m_update_timer->start(m.update_timeout);

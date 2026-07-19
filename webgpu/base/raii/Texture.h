@@ -24,6 +24,8 @@
 #include "base_types.h"
 #include "nucleus/utils/ColourTexture.h"
 #include "nucleus/utils/ColourTexture3D.h"
+#include <QtAssert>
+
 #include <radix/raster.h>
 
 #include <webgpu/webgpu.h>
@@ -57,8 +59,8 @@ public:
     {
         // TODO maybe assert if RasterElementT and WGPUTextureFormat of this texture are compatible?
 
-        assert(static_cast<uint32_t>(data.width()) == m_descriptor.size.width);
-        assert(static_cast<uint32_t>(data.height()) == m_descriptor.size.height);
+        Q_ASSERT(static_cast<uint32_t>(data.width()) == m_descriptor.size.width);
+        Q_ASSERT(static_cast<uint32_t>(data.height()) == m_descriptor.size.height);
 
         WGPUTexelCopyTextureInfo texel_copy_texture_info {};
         texel_copy_texture_info.texture = m_handle;
@@ -107,7 +109,7 @@ public:
         uint32_t bytes_per_extent_row = uint32_t(
             std::ceil(double(extent.x) * double(get_bytes_per_element(m_descriptor.format)) / double(BYTES_PER_ROW_PADDING)) * BYTES_PER_ROW_PADDING);
 
-        assert(bytes_per_extent_row * extent.y <= buffer.size_in_byte());
+        Q_ASSERT(bytes_per_extent_row * extent.y <= buffer.size_in_byte());
 
         WGPUTexelCopyTextureInfo source {};
         source.texture = m_handle;

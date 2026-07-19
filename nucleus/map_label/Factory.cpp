@@ -24,6 +24,7 @@
 
 #include <QDebug>
 #include <QSize>
+#include <QtAssert>
 
 #include "nucleus/picker/types.h"
 #include "nucleus/utils/image_loader.h"
@@ -94,7 +95,7 @@ radix::Raster<glm::u8vec4> Factory::label_icons()
 
     auto combined_icons = radix::raster::concatenate_vertically(std::span<const radix::Raster<glm::u8vec4>>(icons));
     if (!combined_icons) {
-        assert(false && "Map label icons must have equal widths");
+        Q_ASSERT(false && "Map label icons must have equal widths");
         return {};
     }
 
@@ -193,7 +194,7 @@ std::vector<float> inline Factory::create_text_meta(std::u16string* safe_chars, 
             safe_chars->at(i) = 32;
         }
 
-        assert(m_font_data.char_data.contains(safe_chars->at(i)));
+        Q_ASSERT(m_font_data.char_data.contains(safe_chars->at(i)));
 
         int advance, lsb;
         stbtt_GetCodepointHMetrics(&m_font_data.fontinfo, int(safe_chars->at(i)), &advance, &lsb);
