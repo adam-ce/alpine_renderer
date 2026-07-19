@@ -22,7 +22,6 @@
 #include <QDebug>
 #include <QFile>
 #include <QTextStream>
-#include <assert.h>
 #include <filesystem>
 #include <limits>
 #include <memory>

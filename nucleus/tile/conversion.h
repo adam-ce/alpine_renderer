@@ -22,6 +22,7 @@
 #include <glm/glm.hpp>
 
 #include <QByteArray>
+#include <QtAssert>
 #include <radix/raster.h>
 
 #ifdef QT_GUI_LIB
@@ -42,7 +43,7 @@ inline radix::Raster<uint16_t> qimage_to_u16raster(const QImage& qimage)
         // let's hope that the format is always ARGB32
         // if not, please implement the conversion, that'll give better performance.
         // the assert will be disabled in release, just as a backup.
-        assert(false);
+        Q_ASSERT(false);
         return qimage_to_u16raster(qimage.convertedTo(QImage::Format_ARGB32));
     }
     radix::Raster<uint16_t> raster({ qimage.width(), qimage.height() });
@@ -61,7 +62,7 @@ inline radix::Raster<glm::u8vec4> to_rgba8raster(const QImage& image)
         // let's hope that the format is always Format_ARGB32
         // if not, please implement the conversion, that'll give better performance.
         // the assert will be disabled in release, just as a backup.
-        assert(false);
+        Q_ASSERT(false);
         return to_rgba8raster(image.convertedTo(QImage::Format_RGBA8888));
     }
 
@@ -81,7 +82,7 @@ inline radix::Raster<glm::u8vec4> to_rgba8raster(const QImage& image)
 
 [[nodiscard]] inline QImage to_QImage(const radix::Raster<glm::u8vec4>& raster)
 {
-    // assert(m_data.size() == m_width * m_height * 4); // Ensure the data is RGBA8
+    // Q_ASSERT(m_data.size() == m_width * m_height * 4); // Ensure the data is RGBA8
     QImage image(raster.width(), raster.height(), QImage::Format_RGBA8888);
     memcpy(image.bits(), raster.data(), raster.size_in_bytes());
     return image;

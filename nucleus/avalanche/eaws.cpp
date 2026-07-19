@@ -25,6 +25,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QtAssert>
 #include <algorithm>
 #include <extern/radix/src/radix/tile.h>
 #include <nucleus/tile/conversion.h>
@@ -102,13 +103,13 @@ std::expected<RegionTile, QString> vector_tile_reader(const QByteArray& input_da
 std::vector<QPointF> transform_vertices(const Region& region, const radix::tile::Id& tile_id_in, const radix::tile::Id& tile_id_out, QImage* img)
 {
     // Check if input is consistent
-    assert(img->devicePixelRatio() == 1.0);
-    assert((region.resolution.x > 0 && region.resolution.y > 0));
-    assert((img->width() > 0 && img->height() > 0));
-    assert(tile_id_in.coords.x < qPow(2, tile_id_in.zoom_level));
-    assert(tile_id_in.coords.y < qPow(2, tile_id_in.zoom_level));
-    assert(tile_id_out.coords.x < qPow(2, tile_id_out.zoom_level));
-    assert(tile_id_out.coords.y < qPow(2, tile_id_out.zoom_level));
+    Q_ASSERT(img->devicePixelRatio() == 1.0);
+    Q_ASSERT((region.resolution.x > 0 && region.resolution.y > 0));
+    Q_ASSERT((img->width() > 0 && img->height() > 0));
+    Q_ASSERT(tile_id_in.coords.x < qPow(2, tile_id_in.zoom_level));
+    Q_ASSERT(tile_id_in.coords.y < qPow(2, tile_id_in.zoom_level));
+    Q_ASSERT(tile_id_out.coords.x < qPow(2, tile_id_out.zoom_level));
+    Q_ASSERT(tile_id_out.coords.y < qPow(2, tile_id_out.zoom_level));
 
     // Check whether we are zooming in or out for the output raster
     uint zoom_level_in = tile_id_in.zoom_level;
@@ -123,8 +124,8 @@ std::vector<QPointF> transform_vertices(const Region& region, const radix::tile:
     if (zoom_level_in < zoom_level_out) {
 
         // Output tile origin must lie within input tile
-        assert(origin_in.x <= origin_out.x && origin_in.y <= origin_out.y);
-        assert(origin_out.x + tile_size_out <= origin_in.x + tile_size_in && origin_out.y + tile_size_out <= origin_in.y + tile_size_in);
+        Q_ASSERT(origin_in.x <= origin_out.x && origin_in.y <= origin_out.y);
+        Q_ASSERT(origin_out.x + tile_size_out <= origin_in.x + tile_size_in && origin_out.y + tile_size_out <= origin_in.y + tile_size_in);
 
         // Determine origin of output tile w.r.t to input tile. Result in [0,1]x[0,1] since the output origin lies within the input tile
         relative_origin = glm::vec2((origin_out.x - origin_in.x) / tile_size_in, (origin_out.y - origin_in.y) / tile_size_in);
@@ -135,12 +136,12 @@ std::vector<QPointF> transform_vertices(const Region& region, const radix::tile:
     }
 
     // This case does not work and it is not clear at this point if this case is necessary
-    assert(zoom_level_in <= zoom_level_out);
+    Q_ASSERT(zoom_level_in <= zoom_level_out);
     /*
     else if (zoom_level_out < zoom_level_in) {
         // zoom_in > zoom_out => Output tile origin must lie within input tile
-        assert(origin_out.x <= origin_in.x && origin_out.y <= origin_in.y);
-        assert(origin_in.x + tile_size_in <= origin_out.x + tile_size_out && origin_in.y + tile_size_in <= origin_out.y + tile_size_out);
+        Q_ASSERT(origin_out.x <= origin_in.x && origin_out.y <= origin_in.y);
+        Q_ASSERT(origin_in.x + tile_size_in <= origin_out.x + tile_size_out && origin_in.y + tile_size_in <= origin_out.y + tile_size_out);
 
         // Determine origin of input tile w.r.t to output tile. Results in [0,1]x[0,1] since the input origin must lie within the ouput tile
         relative_origin = glm::vec2((origin_in.x - origin_out.x) / tile_size_out, (origin_in.y - origin_out.y) / tile_size_out);
@@ -178,7 +179,7 @@ QImage draw_regions(const RegionTile& region_tile,
     painter.setRenderHint(QPainter::Antialiasing, false);
 
     // Draw all regions to the image
-    assert(region_tile.second.size() > 0);
+    Q_ASSERT(region_tile.second.size() > 0);
     radix::tile::Id tile_id_in = region_tile.first;
     for (const auto& region : region_tile.second) {
         // Only draw regions as of July 1st 2025
@@ -195,9 +196,9 @@ QImage draw_regions(const RegionTile& region_tile,
         painter.setPen(QPen(color_of_region)); // we also have to set the pen if we want to draw boundaries
 
         // Draw polygon: The first point is implicitly connected to the last point, and the polygon is filled with the current brush().
-        assert(img.devicePixelRatio() == 1.0);
+        Q_ASSERT(img.devicePixelRatio() == 1.0);
         painter.drawPolygon(transformed_vertices_as_QPointFs.data(), transformed_vertices_as_QPointFs.size());
-        assert(img.devicePixelRatio() == 1.0);
+        Q_ASSERT(img.devicePixelRatio() == 1.0);
     }
     // return image with all regions in it
     return img;

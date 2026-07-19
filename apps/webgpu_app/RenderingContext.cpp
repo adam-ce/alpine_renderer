@@ -21,6 +21,8 @@
 
 #include "RenderingContext.h"
 
+#include <QtAssert>
+
 #include "nucleus/DataQuerier.h"
 #include "nucleus/tile/SchedulerDirector.h"
 #include "nucleus/tile/Texture3DScheduler.h"
@@ -44,7 +46,7 @@ RenderingContext::RenderingContext()
 {
 
     using TilePattern = nucleus::tile::TileLoadService::UrlPattern;
-    assert(QThread::currentThread() == QCoreApplication::instance()->thread());
+    Q_ASSERT(QThread::currentThread() == QCoreApplication::instance()->thread());
 
 #ifdef ALP_ENABLE_THREADING
     m_scheduler_thread = std::make_unique<QThread>();

@@ -20,6 +20,8 @@
 #pragma once
 
 #include "nucleus/srs.h"
+
+#include <QtAssert>
 #include "nucleus/tile/Cache.h"
 #include "radix/height_encoding.h"
 
@@ -42,7 +44,7 @@ inline std::expected<float, QString> query_altitude(MemoryCache* cache, const gl
     });
     if (!selected_tile.data)
         return std::unexpected(QString("Couldn't find altitude for %1/%2").arg(lat_long.x).arg(lat_long.y));
-    assert(selected_tile.data->size());
+    Q_ASSERT(selected_tile.data->size());
 
     const auto bounds = srs::tile_bounds(selected_tile.id);
     const auto uv = (world_space - bounds.min) / bounds.size();
@@ -55,7 +57,7 @@ inline std::expected<float, QString> query_altitude(MemoryCache* cache, const gl
             return radix::height_encoding::to_float(glm::u8vec3(px));
         }
     }
-    assert(false);
+    Q_ASSERT(false);
     return std::unexpected(QString("Couldn't find altitude for %1/%2").arg(lat_long.x).arg(lat_long.y));
 }
 

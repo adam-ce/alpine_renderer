@@ -23,7 +23,6 @@
 #include "webgpu/engine/Window.h"
 #include <QCoreApplication>
 #include <QFile>
-#include <cassert>
 #include <qthread.h> //TODO maybe only for threading enabled?
 #include <webgpu/base/webgpu_interface.hpp>
 

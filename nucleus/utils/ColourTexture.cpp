@@ -20,6 +20,7 @@
 #include "ColourTexture.h"
 
 #include <QtGlobal>
+#include <QtAssert>
 #include <array>
 #include <cstdint>
 #include <stdexcept>
@@ -31,10 +32,10 @@ namespace {
 
 std::vector<uint8_t> to_dxt1(const radix::Raster<glm::u8vec4>& image)
 {
-    assert(image.width() == image.height());
-    assert(image.width() % 16 == 0);
-    assert(image.size_per_line() * image.height() == image.width() * image.height() * 4);
-    assert(image.size_in_bytes() == image.width() * image.height() * 4);
+    Q_ASSERT(image.width() == image.height());
+    Q_ASSERT(image.width() % 16 == 0);
+    Q_ASSERT(image.size_per_line() * image.height() == image.width() * image.height() * 4);
+    Q_ASSERT(image.size_in_bytes() == image.width() * image.height() * 4);
 
     struct alignas(16) AlignedBlock {
         std::array<uint8_t, 16> data;
@@ -43,7 +44,7 @@ std::vector<uint8_t> to_dxt1(const radix::Raster<glm::u8vec4>& image)
 
     const auto n_bytes_in = size_t(image.size_in_bytes());
     const auto n_bytes_out = image.width() * image.height() / 2;
-    assert(n_bytes_in % sizeof(AlignedBlock) == 0);
+    Q_ASSERT(n_bytes_in % sizeof(AlignedBlock) == 0);
 
     auto aligned_in = std::vector<AlignedBlock>(n_bytes_in / sizeof(AlignedBlock));
     auto data_ptr = reinterpret_cast<uint8_t*>(aligned_in.data());
@@ -51,7 +52,7 @@ std::vector<uint8_t> to_dxt1(const radix::Raster<glm::u8vec4>& image)
 
     std::vector<uint8_t> compressed(n_bytes_out);
     const auto result = goofy::compressDXT1(compressed.data(), data_ptr, (uint32_t)image.width(), (uint32_t)image.height(), (uint32_t)image.width() * 4);
-    assert(result == 0);
+    Q_ASSERT(result == 0);
     Q_UNUSED(result);
 
     return compressed;
@@ -59,10 +60,10 @@ std::vector<uint8_t> to_dxt1(const radix::Raster<glm::u8vec4>& image)
 
 std::vector<uint8_t> to_etc1(const radix::Raster<glm::u8vec4>& image)
 {
-    assert(image.width() == image.height());
-    assert(image.width() % 16 == 0);
-    assert(image.size_per_line() * image.height() == image.width() * image.height() * 4);
-    assert(image.size_in_bytes() == image.width() * image.height() * 4);
+    Q_ASSERT(image.width() == image.height());
+    Q_ASSERT(image.width() % 16 == 0);
+    Q_ASSERT(image.size_per_line() * image.height() == image.width() * image.height() * 4);
+    Q_ASSERT(image.size_in_bytes() == image.width() * image.height() * 4);
 
     struct alignas(16) AlignedBlock {
         std::array<uint8_t, 16> data;
@@ -71,7 +72,7 @@ std::vector<uint8_t> to_etc1(const radix::Raster<glm::u8vec4>& image)
 
     const auto n_bytes_in = size_t(image.size_in_bytes());
     const auto n_bytes_out = image.width() * image.height() / 2;
-    assert(n_bytes_in % sizeof(AlignedBlock) == 0);
+    Q_ASSERT(n_bytes_in % sizeof(AlignedBlock) == 0);
 
     auto aligned_in = std::vector<AlignedBlock>(n_bytes_in / sizeof(AlignedBlock));
     auto data_ptr = reinterpret_cast<uint8_t*>(aligned_in.data());
@@ -79,7 +80,7 @@ std::vector<uint8_t> to_etc1(const radix::Raster<glm::u8vec4>& image)
 
     std::vector<uint8_t> compressed(n_bytes_out);
     const auto result = goofy::compressETC1(compressed.data(), data_ptr, (uint32_t)image.width(), (uint32_t)image.height(), (uint32_t)image.width() * 4);
-    assert(result == 0);
+    Q_ASSERT(result == 0);
     Q_UNUSED(result);
 
     return compressed;
@@ -88,7 +89,7 @@ std::vector<uint8_t> to_etc1(const radix::Raster<glm::u8vec4>& image)
 std::vector<uint8_t> to_uncompressed_rgba(const radix::Raster<glm::u8vec4>& image)
 {
     size_t size_in_bytes = image.size_in_bytes();
-    assert(size_in_bytes == (size_t)image.width() * image.height() * 4);
+    Q_ASSERT(size_in_bytes == (size_t)image.width() * image.height() * 4);
     std::vector<uint8_t> data(size_in_bytes);
     // Note: AND Another copy... We copy the data two times (once in stb_image_loader.cpp)
     std::ranges::copy(image.bytes(), reinterpret_cast<std::byte*>(data.data()));
@@ -99,11 +100,11 @@ std::vector<uint8_t> to_compressed(const radix::Raster<glm::u8vec4>& image, nucl
 {
     using Algorithm = nucleus::utils::ColourTexture::Format;
     if (image.buffer().empty()) {
-        assert(false && "Cannot encode an empty colour raster");
+        Q_ASSERT(false && "Cannot encode an empty colour raster");
         return {};
     }
-    assert(image.width() == image.height());
-    assert(image.width() % 4 == 0 || image.width() == 2 || image.width() == 1);
+    Q_ASSERT(image.width() == image.height());
+    Q_ASSERT(image.width() % 4 == 0 || image.width() == 2 || image.width() == 1);
 
     switch (algorithm) {
     case Algorithm::Uncompressed_RGBA:
@@ -145,7 +146,7 @@ std::vector<uint8_t> to_compressed(const radix::Raster<glm::u8vec4>& image, nucl
         return v;
     }
     }
-    assert(false && "Unsupported colour texture format");
+    Q_ASSERT(false && "Unsupported colour texture format");
     return {};
 }
 } // namespace
@@ -163,7 +164,7 @@ nucleus::utils::MipmappedColourTexture nucleus::utils::generate_mipmapped_colour
 {
     auto mip_levels_result = radix::raster::generate_mipmap(texture);
     if (!mip_levels_result) {
-        assert(false && "Colour textures require square, power-of-two rasters");
+        Q_ASSERT(false && "Colour textures require square, power-of-two rasters");
         return {};
     }
     auto mip_levels = std::move(*mip_levels_result);

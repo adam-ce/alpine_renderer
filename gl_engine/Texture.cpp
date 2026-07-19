@@ -21,6 +21,7 @@
 
 #include <QOpenGLExtraFunctions>
 #include <QOpenGLFunctions>
+#include <QtAssert>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <emscripten/val.h>
@@ -97,9 +98,9 @@ void gl_engine::Texture::bind(unsigned int texture_unit)
 void gl_engine::Texture::setParams(Filter min_filter, Filter mag_filter, bool anisotropic_filtering)
 {
     // doesn't make sense, does it?
-    assert(mag_filter != Filter::MipMapLinear);
+    Q_ASSERT(mag_filter != Filter::MipMapLinear);
 
-    assert(gl_tex_params(m_format).is_texture_filterable || (min_filter == Filter::Nearest && mag_filter == Filter::Nearest));
+    Q_ASSERT(gl_tex_params(m_format).is_texture_filterable || (min_filter == Filter::Nearest && mag_filter == Filter::Nearest));
 
     m_min_filter = min_filter;
     m_mag_filter = mag_filter;
@@ -116,8 +117,8 @@ void gl_engine::Texture::setParams(Filter min_filter, Filter mag_filter, bool an
 
 void gl_engine::Texture::allocate_array(unsigned int width, unsigned int height, unsigned int n_layers)
 {
-    assert(m_target == Target::_2dArray);
-    assert(m_format != Format::Invalid);
+    Q_ASSERT(m_target == Target::_2dArray);
+    Q_ASSERT(m_format != Format::Invalid);
 
     auto mip_level_count = 1;
     if (m_min_filter == Filter::MipMapLinear)
@@ -141,7 +142,7 @@ void gl_engine::Texture::upload(const nucleus::utils::ColourTexture& texture)
     const auto height = GLsizei(texture.height());
     const auto p = gl_tex_params(m_format);
     if (m_format == Format::CompressedRGBA8) {
-        assert(m_min_filter != Filter::MipMapLinear);
+        Q_ASSERT(m_min_filter != Filter::MipMapLinear);
         const auto format = gl_engine::Texture::compressed_texture_format();
         f->glCompressedTexImage2D(GLenum(m_target), 0, format, width, height, 0, GLsizei(texture.n_bytes()), texture.data());
     } else if (m_format == Format::RGBA8 || m_format == Format::SRGBA8) {
@@ -149,16 +150,16 @@ void gl_engine::Texture::upload(const nucleus::utils::ColourTexture& texture)
         if (m_min_filter == Filter::MipMapLinear)
             f->glGenerateMipmap(GLenum(m_target));
     } else {
-        assert(false);
+        Q_ASSERT(false);
     }
 }
 
 void gl_engine::Texture::upload(const nucleus::utils::ColourTexture& texture, unsigned int array_index)
 {
-    assert(texture.width() == m_width);
-    assert(texture.height() == m_height);
-    assert(array_index < m_n_layers);
-    assert(m_min_filter != Filter::MipMapLinear); // use the upload function with nucleus::utils::MipmappedColourTexture
+    Q_ASSERT(texture.width() == m_width);
+    Q_ASSERT(texture.height() == m_height);
+    Q_ASSERT(array_index < m_n_layers);
+    Q_ASSERT(m_min_filter != Filter::MipMapLinear); // use the upload function with nucleus::utils::MipmappedColourTexture
 
     auto* f = QOpenGLContext::currentContext()->extraFunctions();
     f->glBindTexture(GLenum(m_target), m_id);
@@ -171,16 +172,16 @@ void gl_engine::Texture::upload(const nucleus::utils::ColourTexture& texture, un
     } else if (m_format == Format::RGBA8 || m_format == Format::SRGBA8) {
         f->glTexSubImage3D(GLenum(m_target), 0, 0, 0, GLint(array_index), width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE, texture.data());
     } else {
-        assert(false);
+        Q_ASSERT(false);
     }
 }
 
 void gl_engine::Texture::upload(const nucleus::utils::MipmappedColourTexture& mipped_texture, unsigned int array_index)
 {
-    assert(mipped_texture.size() > 0);
-    assert(mipped_texture.front().width() == m_width);
-    assert(mipped_texture.front().height() == m_height);
-    assert(array_index < m_n_layers);
+    Q_ASSERT(mipped_texture.size() > 0);
+    Q_ASSERT(mipped_texture.front().width() == m_width);
+    Q_ASSERT(mipped_texture.front().height() == m_height);
+    Q_ASSERT(array_index < m_n_layers);
 
     auto* f = QOpenGLContext::currentContext()->extraFunctions();
     f->glBindTexture(GLenum(m_target), m_id);
@@ -196,7 +197,7 @@ void gl_engine::Texture::upload(const nucleus::utils::MipmappedColourTexture& mi
         } else if (m_format == Format::RGBA8 || m_format == Format::SRGBA8) {
             f->glTexSubImage3D(GLenum(m_target), mip_level, 0, 0, GLint(array_index), width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE, texture.data());
         } else {
-            assert(false);
+            Q_ASSERT(false);
         }
         ++mip_level;
     }
@@ -204,19 +205,19 @@ void gl_engine::Texture::upload(const nucleus::utils::MipmappedColourTexture& mi
 
 template <typename T> void gl_engine::Texture::upload(const radix::Raster<T>& texture, unsigned int array_index)
 {
-    assert(m_target == Target::_2dArray);
+    Q_ASSERT(m_target == Target::_2dArray);
 
     const auto p = gl_tex_params(m_format);
-    assert(m_format != Format::CompressedRGBA8);
-    assert(m_format != Format::Invalid);
-    assert(sizeof(T) == p.n_bytes_per_element * p.n_elements);
+    Q_ASSERT(m_format != Format::CompressedRGBA8);
+    Q_ASSERT(m_format != Format::Invalid);
+    Q_ASSERT(sizeof(T) == p.n_bytes_per_element * p.n_elements);
     if (!p.is_texture_filterable) {
-        assert(m_mag_filter == Filter::Nearest);
-        assert(m_min_filter == Filter::Nearest);
+        Q_ASSERT(m_mag_filter == Filter::Nearest);
+        Q_ASSERT(m_min_filter == Filter::Nearest);
     }
-    assert(array_index < m_n_layers);
-    assert(texture.width() == m_width);
-    assert(texture.height() == m_height);
+    Q_ASSERT(array_index < m_n_layers);
+    Q_ASSERT(texture.width() == m_width);
+    Q_ASSERT(texture.height() == m_height);
 
     const auto width = GLsizei(texture.width());
     const auto height = GLsizei(texture.height());
@@ -240,15 +241,15 @@ template void gl_engine::Texture::upload<glm::vec<4, float>>(const radix::Raster
 
 template <typename T> void gl_engine::Texture::upload(const radix::Raster<T>& texture)
 {
-    assert(m_target == Target::_2d);
+    Q_ASSERT(m_target == Target::_2d);
 
     const auto p = gl_tex_params(m_format);
-    assert(m_format != Format::CompressedRGBA8);
-    assert(m_format != Format::Invalid);
-    assert(sizeof(T) == p.n_bytes_per_element * p.n_elements);
+    Q_ASSERT(m_format != Format::CompressedRGBA8);
+    Q_ASSERT(m_format != Format::Invalid);
+    Q_ASSERT(sizeof(T) == p.n_bytes_per_element * p.n_elements);
     if (!p.is_texture_filterable) {
-        assert(m_mag_filter == Filter::Nearest);
-        assert(m_min_filter == Filter::Nearest);
+        Q_ASSERT(m_mag_filter == Filter::Nearest);
+        Q_ASSERT(m_min_filter == Filter::Nearest);
     }
 
     QOpenGLExtraFunctions* f = QOpenGLContext::currentContext()->extraFunctions();

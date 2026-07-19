@@ -16,6 +16,8 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *****************************************************************************/
 
+#include <QtAssert>
+
 #include <array>
 #include <vector>
 
@@ -263,8 +265,8 @@ namespace details {
     template <PixelWriterFunctionConcept PixelWriterFunction>
     void render_triangle(const PixelWriterFunction& pixel_writer, const std::array<glm::vec2, 3> triangle, unsigned int triangle_index, float distance)
     {
-        assert(triangle[0].y <= triangle[1].y);
-        assert(triangle[1].y <= triangle[2].y);
+        Q_ASSERT(triangle[0].y <= triangle[1].y);
+        Q_ASSERT(triangle[1].y <= triangle[2].y);
 
         auto edge_top_bottom = triangle[2] - triangle[0];
         auto edge_top_middle = triangle[1] - triangle[0];

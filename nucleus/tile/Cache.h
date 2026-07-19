@@ -20,6 +20,7 @@
 
 #include "types.h"
 #include <QFile>
+#include <QtAssert>
 #include <algorithm>
 #include <filesystem>
 #include <mutex>
@@ -222,7 +223,7 @@ template <NamedTile T> std::expected<void, QString> Cache<T>::read_from_disk(con
 {
     const auto unexpected_error = [](const auto& e) { return std::unexpected(QString::fromStdString(std::make_error_code(e).message())); };
     auto locker = std::scoped_lock(m_data_mutex, m_disk_cached_mutex);
-    assert(SerialisableTile<T>);
+    Q_ASSERT(SerialisableTile<T>);
     const auto check_version = [&unexpected_error](auto* in, const auto& path) -> std::expected<void, QString> {
         std::remove_cvref_t<decltype(T::version_information)> version_info = {};
         {

@@ -20,6 +20,7 @@
 #include "Scheduler.h"
 #include "eaws.h"
 #include <QDate>
+#include <QtAssert>
 #include <nucleus/utils/image_loader.h>
 
 namespace nucleus::avalanche {
@@ -99,13 +100,13 @@ radix::Raster<glm::uint16> Scheduler::to_raster(
     auto bottom = radix::raster::concatenate_horizontally(
         quad_rasters[unsigned(tile::QuadPosition::BottomLeft)], quad_rasters[unsigned(tile::QuadPosition::BottomRight)]);
     if (!top || !bottom) {
-        assert(false && "Avalanche quad rasters must have compatible dimensions");
+        Q_ASSERT(false && "Avalanche quad rasters must have compatible dimensions");
         return {};
     }
 
     auto quad_as_raster = radix::raster::concatenate_vertically(*top, *bottom);
     if (!quad_as_raster) {
-        assert(false && "Avalanche quad raster rows must have compatible dimensions");
+        Q_ASSERT(false && "Avalanche quad raster rows must have compatible dimensions");
         return {};
     }
 

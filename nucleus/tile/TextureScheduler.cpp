@@ -19,6 +19,7 @@
 #include "TextureScheduler.h"
 #include "conversion.h"
 #include <QDebug>
+#include <QtAssert>
 #include <nucleus/utils/image_loader.h>
 
 namespace nucleus::tile {
@@ -55,7 +56,7 @@ void TextureScheduler::set_texture_compression_algorithm(nucleus::utils::ColourT
 
 radix::Raster<glm::u8vec4> TextureScheduler::to_raster(const tile::DataQuad& quad, const radix::Raster<glm::u8vec4>& default_raster)
 {
-    assert(quad.n_tiles == 4);
+    Q_ASSERT(quad.n_tiles == 4);
 
     std::array<radix::Raster<glm::u8vec4>, 4> quad_rasters;
     std::array<tile::Id, 4> quad_ids;
@@ -77,13 +78,13 @@ radix::Raster<glm::u8vec4> TextureScheduler::to_raster(const tile::DataQuad& qua
     auto bottom = radix::raster::concatenate_horizontally(
         quad_rasters[unsigned(tile::QuadPosition::BottomLeft)], quad_rasters[unsigned(tile::QuadPosition::BottomRight)]);
     if (!top || !bottom) {
-        assert(false && "Texture quad rasters must have compatible dimensions");
+        Q_ASSERT(false && "Texture quad rasters must have compatible dimensions");
         return {};
     }
 
     auto ortho_raster = radix::raster::concatenate_vertically(*top, *bottom);
     if (!ortho_raster) {
-        assert(false && "Texture quad raster rows must have compatible dimensions");
+        Q_ASSERT(false && "Texture quad raster rows must have compatible dimensions");
         return {};
     }
 

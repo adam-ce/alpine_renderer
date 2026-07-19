@@ -22,6 +22,7 @@
 #include "ShaderRegistry.h"
 #include "TileGeometry.h"
 #include <QOpenGLExtraFunctions>
+#include <QtAssert>
 #include <TextureLayer.h>
 
 namespace gl_engine {
@@ -100,8 +101,8 @@ void AvalancheWarningLayer::update_gpu_tiles(const std::vector<nucleus::tile::Id
     }
     for (const auto& tile : new_tiles) {
         // test for validity
-        assert(tile.id.zoom_level < 100);
-        assert(tile.texture);
+        Q_ASSERT(tile.id.zoom_level < 100);
+        Q_ASSERT(tile.texture);
 
         // find empty spot and upload texture
         const auto layer_index = m_gpu_array_helper.add_tile(tile.id);
@@ -111,8 +112,8 @@ void AvalancheWarningLayer::update_gpu_tiles(const std::vector<nucleus::tile::Id
 
 void AvalancheWarningLayer::set_tile_limit(unsigned int new_limit)
 {
-    assert(new_limit < 2048); // array textures with size > 2048 are not supported on all devices
-    assert(!m_texture_array);
+    Q_ASSERT(new_limit < 2048); // array textures with size > 2048 are not supported on all devices
+    Q_ASSERT(!m_texture_array);
     m_gpu_array_helper.set_tile_limit(new_limit);
 }
 
