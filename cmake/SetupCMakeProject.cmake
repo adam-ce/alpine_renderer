@@ -1,5 +1,5 @@
 #############################################################################
-# Alpine Terrain Renderer
+# AlpineMaps.org
 # Copyright (C) 2026 Adam Celarek <family name at cg tuwien ac at>
 #
 # This program is free software: you can redistribute it and/or modify
@@ -21,6 +21,12 @@ include_guard(GLOBAL)
 if(NOT COMMAND alp_add_git_repository)
     include(${CMAKE_CURRENT_LIST_DIR}/AddRepo.cmake)
 endif()
+
+if(NOT COMMAND alp_check_for_script_updates)
+    include(${CMAKE_CURRENT_LIST_DIR}/CheckForScriptUpdates.cmake)
+endif()
+
+alp_check_for_script_updates("${CMAKE_CURRENT_LIST_FILE}")
 
 macro(_alp_append_cache_arg out var type)
     if(DEFINED ${var} AND NOT "${${var}}" STREQUAL "")
@@ -96,15 +102,31 @@ function(_alp_build_and_install_cmake_project NAME SRC_DIR BUILD_DIR INSTALL_DIR
         _alp_append_cache_arg(_configure_args ${_var} STRING)
     endforeach()
 
+    string(JOIN " " _alp_sanitizer_flags ${ALP_SANITIZER_FLAGS})
+
     foreach(_lang C CXX)
-        _alp_append_cache_arg(_configure_args CMAKE_${_lang}_FLAGS STRING)
+        set(_alp_effective_flags "${CMAKE_${_lang}_FLAGS}")
+        if(_alp_sanitizer_flags)
+            string(APPEND _alp_effective_flags " ${_alp_sanitizer_flags}")
+        endif()
+        if(_alp_effective_flags)
+            string(REPLACE ";" "\\;" _alp_effective_flags "${_alp_effective_flags}")
+            list(APPEND _configure_args "-DCMAKE_${_lang}_FLAGS:STRING=${_alp_effective_flags}")
+        endif()
         foreach(_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
             _alp_append_cache_arg(_configure_args CMAKE_${_lang}_FLAGS_${_config} STRING)
         endforeach()
     endforeach()
 
     foreach(_kind EXE SHARED MODULE STATIC)
-        _alp_append_cache_arg(_configure_args CMAKE_${_kind}_LINKER_FLAGS STRING)
+        set(_alp_effective_flags "${CMAKE_${_kind}_LINKER_FLAGS}")
+        if(_alp_sanitizer_flags AND NOT _kind STREQUAL "STATIC")
+            string(APPEND _alp_effective_flags " ${_alp_sanitizer_flags}")
+        endif()
+        if(_alp_effective_flags)
+            string(REPLACE ";" "\\;" _alp_effective_flags "${_alp_effective_flags}")
+            list(APPEND _configure_args "-DCMAKE_${_kind}_LINKER_FLAGS:STRING=${_alp_effective_flags}")
+        endif()
         foreach(_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
             _alp_append_cache_arg(_configure_args CMAKE_${_kind}_LINKER_FLAGS_${_config} STRING)
         endforeach()
@@ -163,6 +185,7 @@ function(alp_setup_cmake_project arg_NAME)
     set(_version_var "ALP_INSTALLED_${arg_NAME}_VERSION")
     set(_path_var "ALP_INSTALLED_${arg_NAME}_PATH")
     set(_key_parts
+        "URL=${arg_URL}"
         "COMMITISH=${arg_COMMITISH}"
         "CMAKE_ARGUMENTS=${arg_CMAKE_ARGUMENTS}"
         "CMAKE_GENERATOR=${CMAKE_GENERATOR}"
@@ -171,6 +194,7 @@ function(alp_setup_cmake_project arg_NAME)
         "CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
         "CMAKE_CONFIGURATION_TYPES=${CMAKE_CONFIGURATION_TYPES}"
         "BUILD_CONFIG=${_build_config}")
+    _alp_append_key_value(_key_parts ALP_SANITIZER_FLAGS)
     _alp_append_key_value(_key_parts CMAKE_PREFIX_PATH)
     foreach(_var IN LISTS _ALP_CMAKE_PROJECT_FORWARD_VARS)
         _alp_append_key_value(_key_parts ${_var})
