@@ -44,11 +44,11 @@ if (EMSCRIPTEN)
             "$<TARGET_FILE_DIR:plain_renderer>/qtloader.js"
             "${CMAKE_SOURCE_DIR}/site/mascot.png"
         DESTINATION
-            ${ALP_WWW_INSTALL_DIR}
+            "${ALP_WWW_INSTALL_DIR}/plain_renderer"
     )
     install(
         FILES "$<TARGET_FILE_DIR:plain_renderer>/plain_renderer.worker.js"
-        DESTINATION ${ALP_WWW_INSTALL_DIR}
+        DESTINATION "${ALP_WWW_INSTALL_DIR}/plain_renderer"
         OPTIONAL
     )
 

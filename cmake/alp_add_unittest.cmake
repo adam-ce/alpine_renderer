@@ -44,10 +44,10 @@ function(alp_add_unittest name)
                 "$<TARGET_FILE_DIR:${name}>/${name}.html"
                 "$<TARGET_FILE_DIR:${name}>/qtloader.js"
             DESTINATION
-                ${ALP_WWW_INSTALL_DIR})
+                "${ALP_WWW_INSTALL_DIR}/${name}")
         install(
             FILES "$<TARGET_FILE_DIR:${name}>/${name}.worker.js"
-            DESTINATION ${ALP_WWW_INSTALL_DIR}
+            DESTINATION "${ALP_WWW_INSTALL_DIR}/${name}"
             OPTIONAL
         )
     elseif(ANDROID)

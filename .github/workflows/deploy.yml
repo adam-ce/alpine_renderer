@@ -383,11 +383,15 @@ jobs:
       if: always()
       run: ccache --show-stats --verbose
 
-    - name: Verify WebGPU app artifacts
+    - name: Verify app artifacts
       run: |
-        test -f "$INSTALL_DIR/webgpu_app.html"
-        test -f "$INSTALL_DIR/webgpu_app.js"
-        test -f "$INSTALL_DIR/webgpu_app.wasm"
+        test -f "$INSTALL_DIR/alpineapp/alpineapp.html"
+        test -f "$INSTALL_DIR/alpineapp/alpineapp.js"
+        test -f "$INSTALL_DIR/alpineapp/alpineapp.wasm"
+        test -f "$INSTALL_DIR/alpineapp/logo_vertical_light_bg.png"
+        test -f "$INSTALL_DIR/webgpu_app/webgpu_app.html"
+        test -f "$INSTALL_DIR/webgpu_app/webgpu_app.js"
+        test -f "$INSTALL_DIR/webgpu_app/webgpu_app.wasm"
 
     - name: Create artifact
       uses: actions/upload-artifact@v5
@@ -451,9 +455,10 @@ jobs:
       run: |
         for config in wasm_mt wasm_mt_debug wasm_mt_lto; do
           cd "$GITHUB_WORKSPACE/github_page/$config"
-          wget -q https://raw.githubusercontent.com/gzuidhof/coi-serviceworker/master/coi-serviceworker.min.js
-          for html in alpineapp.html webgpu_app.html; do
+          for target in alpineapp webgpu_app; do
+            html="$target/$target.html"
             test -f "$html"
+            wget -q -O "$target/coi-serviceworker.min.js" https://raw.githubusercontent.com/gzuidhof/coi-serviceworker/master/coi-serviceworker.min.js
             sed -i -e 's#<body onload="init()">#<body onload="init()"><script src="coi-serviceworker\.min\.js"></script>#g' "$html"
           done
         done
