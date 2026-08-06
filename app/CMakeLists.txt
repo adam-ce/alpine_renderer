@@ -199,8 +199,6 @@ if (ANDROID)
 endif()
 
 if (EMSCRIPTEN)
-    target_link_options(alpineapp PUBLIC -sASYNCIFY)
-
     install(
         FILES
             "$<TARGET_FILE_DIR:alpineapp>/alpineapp.js"
