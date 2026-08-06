@@ -33,7 +33,6 @@ alp_configure_target(plain_renderer)
 
 if (EMSCRIPTEN)
     message(NOTICE "ALP_WWW_INSTALL_DIR = ${ALP_WWW_INSTALL_DIR}")
-    configure_file(../site/mascot.png mascot.png COPYONLY)
     set(ALP_INSTALL_FILES
     )
     install(
@@ -42,7 +41,6 @@ if (EMSCRIPTEN)
             "$<TARGET_FILE_DIR:plain_renderer>/plain_renderer.wasm"
             "$<TARGET_FILE_DIR:plain_renderer>/plain_renderer.html"
             "$<TARGET_FILE_DIR:plain_renderer>/qtloader.js"
-            "${CMAKE_SOURCE_DIR}/site/mascot.png"
         DESTINATION
             "${ALP_WWW_INSTALL_DIR}/plain_renderer"
     )
