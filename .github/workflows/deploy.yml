@@ -193,7 +193,7 @@ jobs:
         find "$BUILD_DIR" -type f -iname "*.apk" ! -name "android-build-*.apk" -exec cp {} "$INSTALL_DIR" \;
 
     - name: Create artifact
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v7
       with:
         name: files_${{ matrix.qtarch }}
         path: ${{ github.workspace }}/install/
@@ -394,7 +394,7 @@ jobs:
         test -f "$INSTALL_DIR/webgpu_app/webgpu_app.wasm"
 
     - name: Create artifact
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v7
       with:
         name: files_${{ matrix.config}}
         path: ${{ github.workspace }}/install/
@@ -469,13 +469,13 @@ jobs:
         target: github_page
     
     - name: Create Pages artifact
-      uses: actions/upload-pages-artifact@v4
+      uses: actions/upload-pages-artifact@v5
       with:
         path: ${{github.workspace}}/github_page
     
     - name: Setup Pages
-      uses: actions/configure-pages@v5
+      uses: actions/configure-pages@v6
 
     - name: Deploy to GitHub Pages
       id: deployment
-      uses: actions/deploy-pages@v4
+      uses: actions/deploy-pages@v5

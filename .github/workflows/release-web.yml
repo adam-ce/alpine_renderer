@@ -194,7 +194,7 @@ jobs:
         mv "${{ github.workspace }}/release/alpineapp.html" "${{ github.workspace }}/release/index.html"
 
     - name: Create release artifact
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@v7
       with:
         name: release_web
         path: ${{ github.workspace }}/release/
