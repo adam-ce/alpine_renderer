@@ -205,9 +205,5 @@ if (MSVC)
     # /WX fails with an unreachable code warning/error in zpp_bits.h. the system property doesn't seem to work (even though it appears in the build log as
     # "-external:ID:\a\renderer\renderer\extern\zppbits -external:W0")
 else()
-    # imgui does not compile with -Werror. so we have to make it private for now.
-    # better solutions welcome
-    target_compile_options(nucleus PRIVATE -Wall -Wextra -pedantic -Werror)
-    # PUBLIC so every target linking nucleus inherits the suppression
-    target_compile_options(nucleus PUBLIC -Wno-missing-field-initializers)
+    target_compile_options(nucleus PUBLIC -Wall -Wextra -pedantic -Werror -Wno-missing-field-initializers)
 endif()
