@@ -494,10 +494,10 @@ void CloudRenderer::update_gpu_tiles_cloud(const std::vector<nucleus::tile::Id>&
         Q_ASSERT(atlas_y < ATLAS_SCALE_XY);
         Q_ASSERT(atlas_z < ATLAS_SCALE_Z);
         // Note: z is "up" in texture space
-        for (int i = 0; i < tile.texture->size(); ++i) {
+        for (std::size_t i = 0; i < tile.texture->size(); ++i) {
             const auto& level = tile.texture->at(i);
             glm::uvec3 atlas_offset = { atlas_x * level.width(), atlas_y * level.height(), atlas_z * level.depth() };
-            m_cloud_atlas_texture->write(m_ctx->queue(), level, atlas_offset, i);
+            m_cloud_atlas_texture->write(m_ctx->queue(), level, atlas_offset, uint32_t(i));
         }
 
         // convert to coords at max zoom level

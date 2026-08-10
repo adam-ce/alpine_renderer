@@ -256,7 +256,7 @@ void waitForFlag(const WGPUDevice& device, bool* flag, int sleepInterval, int ti
     }
 }
 
-void checkForTimingSupport(const WGPUAdapter& adapter, const WGPUDevice& device)
+void checkForTimingSupport([[maybe_unused]] const WGPUAdapter& adapter, [[maybe_unused]] const WGPUDevice& device)
 {
     // Check wether timing is supported
 #ifdef __EMSCRIPTEN__

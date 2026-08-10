@@ -140,7 +140,7 @@ void ComputeReleasePointsNode::run_impl()
         .userdata2 = nullptr,
     };
 
-    WGPUFuture future = wgpuQueueOnSubmittedWorkDone(m_ctx->queue(), callback_info);
+    wgpuQueueOnSubmittedWorkDone(m_ctx->queue(), callback_info);
 }
 
 std::unique_ptr<webgpu::raii::TextureWithSampler> ComputeReleasePointsNode::create_release_points_texture(
