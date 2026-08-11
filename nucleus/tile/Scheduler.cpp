@@ -256,13 +256,13 @@ void Scheduler::clear_full_cache()
     set_ram_quad_limit(old_ram_quad_limit);
 }
 
-std::expected<void, QString> Scheduler::read_disk_cache()
+bool Scheduler::read_disk_cache()
 {
     if (m_name == "unnamed" || m_name.isEmpty()) {
         const auto error = QString("Not reading tiles as the scheduler is not named, and this would cause name conflicts in the file system."
                                    "Name your scheduler, e.g., by using the scheduler director.");
         qDebug() << error;
-        return std::unexpected(error);
+        return false;
     }
     const auto r = m_ram_cache.read_from_disk(disk_cache_path());
     if (r.has_value()) {
@@ -275,8 +275,9 @@ std::expected<void, QString> Scheduler::read_disk_cache()
                         .arg(QString::fromStdString(disk_cache_path().string()))
                         .arg(r.error());
         std::filesystem::remove_all(disk_cache_path());
+        return false;
     }
-    return r;
+    return true;
 }
 
 std::vector<Id> Scheduler::quads_for_current_camera_position() const

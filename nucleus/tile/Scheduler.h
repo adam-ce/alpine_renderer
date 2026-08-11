@@ -82,7 +82,7 @@ public:
     [[nodiscard]] unsigned int persist_timeout() const;
     void set_persist_timeout(unsigned int new_persist_timeout);
 
-    std::expected<void, QString> read_disk_cache();
+    bool read_disk_cache();
 
     void set_retirement_age_for_tile_cache(unsigned int new_retirement_age_for_tile_cache);
 
