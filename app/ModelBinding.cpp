@@ -95,19 +95,6 @@ template <typename Vec> std::function<QVariant(const QVariant&, const QVariant&)
     };
 }
 
-template <typename Vec> std::function<QVariant(const QVariant&, const QVariant&)> write_fun_for_vec(const QString& member)
-{
-    if (member == "x")
-        return write_fun_for_vec_x<Vec>();
-    if (member == "y")
-        return write_fun_for_vec_y<Vec>();
-    if (member == "z")
-        return write_fun_for_vec_z<Vec>();
-    if (member == "w")
-        return write_fun_for_vec_w<Vec>();
-    return {};
-}
-
 std::function<QVariant(const QVariant&, const QVariant&)> write_fun_for(const QMetaType& t, const QString& member)
 {
     if (t.id() == QMetaType::Type::QVector2D && member == "x")
