@@ -185,7 +185,6 @@ jobs:
         test -f "$APP_DIR/alpineapp.html"
         test -f "$APP_DIR/alpineapp.js"
         test -f "$APP_DIR/alpineapp.wasm"
-        test -f "$APP_DIR/alpineapp.worker.js"
         test -f "$APP_DIR/qtloader.js"
         test -f "$APP_DIR/logo_vertical_light_bg.png"
 
