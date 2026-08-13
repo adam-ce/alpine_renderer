@@ -85,6 +85,7 @@ jobs:
     - name: Configure
       env:
         CMAKE_PREFIX_PATH: ${{ env.QT_ROOT_DIR }}/lib/cmake
+        GITHUB_TOKEN: ${{ github.token }}
       run: >
         cmake --preset ${{ matrix.preset }}
         -DCMAKE_POLICY_DEFAULT_CMP0141=NEW

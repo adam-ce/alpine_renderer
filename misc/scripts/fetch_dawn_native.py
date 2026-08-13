@@ -27,7 +27,11 @@ def safe_extract(tar_path, extract_to):
 
 def release_assets(version):
     url = f"https://api.github.com/repos/google/dawn/releases/tags/v{version}"
-    request = urllib.request.Request(url, headers={"User-Agent": "webigeo-build"})
+    headers = {"User-Agent": "webigeo-build"}
+    github_token = os.environ.get("GITHUB_TOKEN")
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+    request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.load(response).get("assets", [])
