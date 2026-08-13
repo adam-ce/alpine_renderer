@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -10,6 +11,34 @@ import tempfile
 import urllib.request
 
 from setup_utils import log, fail, download
+
+
+def verify_digest(path, digest):
+    if not digest:
+        fail("Dawn release asset does not provide a digest")
+
+    try:
+        algorithm, expected = digest.split(":", 1)
+    except ValueError:
+        fail(f"Invalid Dawn release asset digest: {digest}")
+
+    if algorithm.lower() != "sha256" or len(expected) != 64:
+        fail(f"Unsupported Dawn release asset digest: {digest}")
+
+    try:
+        int(expected, 16)
+    except ValueError:
+        fail(f"Invalid Dawn release asset digest: {digest}")
+
+    hasher = hashlib.sha256()
+    with open(path, "rb") as archive:
+        for chunk in iter(lambda: archive.read(1024 * 1024), b""):
+            hasher.update(chunk)
+
+    if hasher.hexdigest() != expected.lower():
+        fail(f"Dawn release asset digest mismatch for {os.path.basename(path)}")
+
+    log(f"Verified SHA-256 digest for {os.path.basename(path)}")
 
 
 def safe_extract(tar_path, extract_to):
@@ -70,11 +99,13 @@ def main():
         fail(f"Multiple Dawn release assets match *{asset_suffix} for v{args.dawn_version}")
 
     asset = matches[0]
+    asset_digest = asset.get("digest")
     tmp_dir = tempfile.mkdtemp(prefix="fetchdawn_native_")
     archive_path = os.path.join(tmp_dir, asset["name"])
 
     try:
         download(asset["browser_download_url"], archive_path)
+        verify_digest(archive_path, asset_digest)
         safe_extract(archive_path, tmp_dir)
         package_root = find_package_root(tmp_dir)
 
