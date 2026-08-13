@@ -76,11 +76,11 @@ QString texel_component_float(const glm::vec<length, Type>& texel, int i)
     return "0.0";
 };
 
-template <typename Type>
-QString texel_component_float(const Type& texel, int)
-{
-    return QString("float(%1)").arg(texel);
-};
+// template <typename Type>
+// QString texel_component_float(const Type& texel, int)
+// {
+//     return QString("float(%1)").arg(texel);
+// };
 
 template <int length, typename Type, typename TexelType = glm::vec<length, Type>>
 void test_unsigned_texture_with(const TexelType& texel_value, gl_engine::Texture::Format format)

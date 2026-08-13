@@ -138,7 +138,7 @@ void TextureOverlay::init(Context& context)
     create_texture(context.webgpu_ctx(), 1, 1);
 }
 
-void TextureOverlay::ready(webgpu::Context& ctx) { m_is_ready = true; }
+void TextureOverlay::ready(webgpu::Context&) { m_is_ready = true; }
 
 void TextureOverlay::create_texture(webgpu::Context& ctx, uint32_t width, uint32_t height)
 {

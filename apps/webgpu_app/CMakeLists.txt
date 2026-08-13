@@ -93,6 +93,10 @@ set_target_properties(webgpu_app PROPERTIES
 target_link_libraries(webgpu_app PUBLIC webgpu webgpu_engine Qt::Core Qt::Network)
 target_include_directories(webgpu_app PRIVATE .)
 
+if (NOT EMSCRIPTEN)
+    target_link_libraries(webgpu_app PRIVATE SDL2::SDL2main)
+endif()
+
 if (ALP_WEBGPU_APP_ENABLE_COMPUTE)
     target_link_libraries(webgpu_app PUBLIC webgpu_compute)
     target_compile_definitions(webgpu_app PRIVATE ALP_WEBGPU_APP_ENABLE_COMPUTE)
@@ -102,7 +106,8 @@ endif()
     alp_add_git_repository(iconfontcppheaders URL https://github.com/juliettef/IconFontCppHeaders.git COMMITISH f30b1e73b2d71eb331d77619c3f1de34199afc38 DO_NOT_ADD_SUBPROJECT)
     target_include_directories(webgpu_app PRIVATE ${CMAKE_SOURCE_DIR}/extern/iconfontcppheaders)
 
-    alp_add_git_repository(imgui URL https://github.com/AlpineMapsOrgDependencies/imgui_slim.git COMMITISH 4d8ecbf58ebf32e757ff56a60f1fb0446033edb8)
+    alp_add_git_repository(imgui URL https://github.com/AlpineMapsOrgDependencies/imgui_slim.git COMMITISH 522f9c88b486a472baeb356398899ae798f06b9b DO_NOT_ADD_SUBPROJECT)
+    include(${CMAKE_SOURCE_DIR}/cmake/SetupImGui.cmake)
 
     set(IMNODES_IMGUI_TARGET_NAME imgui)
     set(BUILD_SHARED_LIBS_SAVED ${BUILD_SHARED_LIBS})
@@ -110,7 +115,7 @@ endif()
     alp_add_git_repository(imnodes URL https://github.com/AlpineMapsOrgDependencies/imnodes_slim.git COMMITISH 324355e64ed8b5bea02fe1439cdcb5c7773b4436)
     set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_SAVED})
 
-    target_link_libraries(webgpu_app PRIVATE imgui imnodes)
+    target_link_libraries(webgpu_app PRIVATE imgui_sdl2_wgpu imnodes)
 
 if (NOT EMSCRIPTEN)
     alp_add_git_repository(ImGuiFileDialog URL https://github.com/AlpineMapsOrgDependencies/ImGuiFileDialog_slim.git COMMITISH 39f98eb131ee00d476f1002336fc7e9e1795ccc5)
@@ -231,6 +236,6 @@ if (EMSCRIPTEN)
         get_filename_component(SHELL_FILE_NAME ${SHELL_FILE} NAME)
         list(APPEND WASM_OUTPUT_FILES ${CMAKE_CURRENT_BINARY_DIR}/${SHELL_FILE_NAME})
     endforeach()
-    install(FILES ${WASM_OUTPUT_FILES} DESTINATION ${ALP_WWW_INSTALL_DIR})
+    install(FILES ${WASM_OUTPUT_FILES} DESTINATION "${ALP_WWW_INSTALL_DIR}/webgpu_app")
     # ================================================
 endif()

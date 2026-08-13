@@ -31,14 +31,6 @@
 
 using webgpu_engine::TileMeshRenderer;
 
-namespace {
-template <typename T>
-int bufferLengthInBytes(const std::vector<T>& vec)
-{
-    return int(vec.size() * sizeof(T));
-}
-} // namespace
-
 namespace webgpu_engine {
 
 TileMeshRenderer::TileMeshRenderer(uint32_t height_resolution, uint32_t ortho_resolution)

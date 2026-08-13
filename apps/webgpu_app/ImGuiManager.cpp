@@ -231,12 +231,12 @@ void ImGuiManager::on_file_uploaded(const std::string& filename, const std::stri
 #endif
 
 bool ImGuiManager::FilePicker(const char* dialog_id,
-    const char* title,
+    [[maybe_unused]] const char* title,
     const char* filters,
     bool wants_open,
     std::vector<std::string>& out_paths,
     bool allow_multiple,
-    const char* initial_path,
+    [[maybe_unused]] const char* initial_path,
     FilePickerMode mode,
     const char* default_filename)
 {
