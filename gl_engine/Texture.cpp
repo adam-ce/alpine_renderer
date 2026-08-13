@@ -23,8 +23,7 @@
 #include <QOpenGLFunctions>
 #include <QtAssert>
 #ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-#include <emscripten/val.h>
+#include <emscripten/html5_webgl.h>
 #endif
 #ifdef ANDROID
 #include <GLES3/gl3.h>
@@ -275,20 +274,19 @@ GLenum gl_engine::Texture::compressed_texture_format()
     // DXT1, also called s3tc, old desktop compression
     // ETC1, old mobile compression
 #if defined(__EMSCRIPTEN__)
-    // clang-format off
-    static int gl_texture_format = EM_ASM_INT({
-        var canvas = document.createElement('canvas');
-        var gl = canvas.getContext("webgl2");
-        const ext = gl.getExtension("WEBGL_compressed_texture_etc");
-        if (ext === null)
-            return 0;
-        return ext.COMPRESSED_SRGB8_ETC2;
-    });
-    // qDebug() << "gl_engine::Texture::compressed_texture_format: gl_texture_format from js: " << gl_texture_format;
-    // clang-format on
-    if (gl_texture_format == 0) {
-        gl_texture_format = GL_COMPRESSED_SRGB_S3TC_DXT1_EXT; // not on mobile
-    }
+    static const GLenum gl_texture_format = []() {
+        const auto context = emscripten_webgl_get_current_context();
+        if (!context)
+            qFatal("No current WebGL context while detecting texture compression");
+        if (emscripten_webgl_enable_extension(context, "WEBGL_compressed_texture_etc"))
+            return GLenum(GL_COMPRESSED_SRGB8_ETC2);
+
+        const bool s3tc = emscripten_webgl_enable_extension(context, "WEBGL_compressed_texture_s3tc");
+        const bool s3tc_srgb = emscripten_webgl_enable_extension(context, "WEBGL_compressed_texture_s3tc_srgb");
+        if (!s3tc || !s3tc_srgb)
+            qFatal("Neither ETC nor sRGB S3TC texture compression is supported");
+        return GLenum(GL_COMPRESSED_SRGB_S3TC_DXT1_EXT);
+    }();
     return gl_texture_format;
 #elif defined(__ANDROID__)
     return GL_COMPRESSED_SRGB8_ETC2;
@@ -300,21 +298,20 @@ GLenum gl_engine::Texture::compressed_texture_format()
 nucleus::utils::ColourTexture::Format gl_engine::Texture::compression_algorithm()
 {
 #if defined(__EMSCRIPTEN__)
-    // clang-format off
-    static const int gl_texture_format = EM_ASM_INT({
-        var canvas = document.createElement('canvas');
-        var gl = canvas.getContext("webgl2");
-        const ext = gl.getExtension("WEBGL_compressed_texture_etc");
-        if (ext === null)
-            return 0;
-        return ext.COMPRESSED_RGB8_ETC2;
-    });
-    // clang-format on
-    // qDebug() << "gl_engine::Texture::compression_algorithm: gl_texture_format from js: " << gl_texture_format;
-    if (gl_texture_format == 0) {
+    static const auto compression_algorithm = []() {
+        const auto context = emscripten_webgl_get_current_context();
+        if (!context)
+            qFatal("No current WebGL context while detecting texture compression");
+        if (emscripten_webgl_enable_extension(context, "WEBGL_compressed_texture_etc"))
+            return nucleus::utils::ColourTexture::Format::ETC1;
+
+        const bool s3tc = emscripten_webgl_enable_extension(context, "WEBGL_compressed_texture_s3tc");
+        const bool s3tc_srgb = emscripten_webgl_enable_extension(context, "WEBGL_compressed_texture_s3tc_srgb");
+        if (!s3tc || !s3tc_srgb)
+            qFatal("Neither ETC nor sRGB S3TC texture compression is supported");
         return nucleus::utils::ColourTexture::Format::DXT1;
-    }
-    return nucleus::utils::ColourTexture::Format::ETC1;
+    }();
+    return compression_algorithm;
 #elif defined(__ANDROID__)
     return nucleus::utils::ColourTexture::Format::ETC1;
 #else
@@ -325,19 +322,12 @@ nucleus::utils::ColourTexture::Format gl_engine::Texture::compression_algorithm(
 GLenum gl_engine::Texture::max_anisotropy_param()
 {
 #if defined(__EMSCRIPTEN__)
-    // clang-format off
-    static const int param = EM_ASM_INT({
-        var canvas = document.createElement('canvas');
-        var gl = canvas.getContext("webgl2");
-        const ext =
-          gl.getExtension("EXT_texture_filter_anisotropic") ||
-          gl.getExtension("MOZ_EXT_texture_filter_anisotropic") ||
-          gl.getExtension("WEBKIT_EXT_texture_filter_anisotropic");
-        if (ext)
-            return ext.TEXTURE_MAX_ANISOTROPY_EXT;
-        return 0;
-    });
-    // clang-format on
+    static const GLenum param = []() {
+        const auto context = emscripten_webgl_get_current_context();
+        if (!context)
+            qFatal("No current WebGL context while detecting anisotropic filtering");
+        return emscripten_webgl_enable_extension(context, "EXT_texture_filter_anisotropic") ? GLenum(GL_TEXTURE_MAX_ANISOTROPY_EXT) : GLenum(0);
+    }();
     return param;
 #elif defined(__ANDROID__)
     return GL_TEXTURE_MAX_ANISOTROPY_EXT;
@@ -349,19 +339,17 @@ GLenum gl_engine::Texture::max_anisotropy_param()
 float gl_engine::Texture::max_anisotropy()
 {
 #if defined(__EMSCRIPTEN__)
-    // clang-format off
-    static const float max_anisotropy = std::min(32.f, float(EM_ASM_DOUBLE({
-        var canvas = document.createElement('canvas');
-        var gl = canvas.getContext("webgl2");
-        const ext =
-          gl.getExtension("EXT_texture_filter_anisotropic") ||
-          gl.getExtension("MOZ_EXT_texture_filter_anisotropic") ||
-          gl.getExtension("WEBKIT_EXT_texture_filter_anisotropic");
-        if (ext)
-          return gl.getParameter(ext.MAX_TEXTURE_MAX_ANISOTROPY_EXT);
-        return 0;
-    })));
-    // clang-format on
+    static const float max_anisotropy = []() {
+        const auto context = emscripten_webgl_get_current_context();
+        if (!context)
+            qFatal("No current WebGL context while detecting anisotropic filtering");
+        if (!emscripten_webgl_enable_extension(context, "EXT_texture_filter_anisotropic"))
+            return 0.f;
+
+        GLfloat value = 0.f;
+        QOpenGLContext::currentContext()->extraFunctions()->glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &value);
+        return std::min(32.f, value);
+    }();
     return max_anisotropy;
 #elif defined(__ANDROID__)
     static const float max_anisotropy = []() {

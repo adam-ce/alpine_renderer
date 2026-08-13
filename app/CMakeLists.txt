@@ -199,18 +199,17 @@ if (ANDROID)
 endif()
 
 if (EMSCRIPTEN)
-    target_link_options(alpineapp PUBLIC -sASYNCIFY)
-
     install(
         FILES
             "$<TARGET_FILE_DIR:alpineapp>/alpineapp.js"
             "$<TARGET_FILE_DIR:alpineapp>/alpineapp.wasm"
-            "$<TARGET_FILE_DIR:alpineapp>/alpineapp.html"
             "$<TARGET_FILE_DIR:alpineapp>/qtloader.js"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shell/alpineapp.html"
+            "${CMAKE_CURRENT_SOURCE_DIR}/icons/logo_vertical_light_bg.png"
         DESTINATION
-            ${ALP_WWW_INSTALL_DIR})
+            "${ALP_WWW_INSTALL_DIR}/alpineapp")
     install(FILES "$<TARGET_FILE_DIR:alpineapp>/alpineapp.worker.js"
-        DESTINATION ${ALP_WWW_INSTALL_DIR}
+        DESTINATION "${ALP_WWW_INSTALL_DIR}/alpineapp"
         OPTIONAL
     )
 else()

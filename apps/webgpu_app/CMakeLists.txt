@@ -236,6 +236,6 @@ if (EMSCRIPTEN)
         get_filename_component(SHELL_FILE_NAME ${SHELL_FILE} NAME)
         list(APPEND WASM_OUTPUT_FILES ${CMAKE_CURRENT_BINARY_DIR}/${SHELL_FILE_NAME})
     endforeach()
-    install(FILES ${WASM_OUTPUT_FILES} DESTINATION ${ALP_WWW_INSTALL_DIR})
+    install(FILES ${WASM_OUTPUT_FILES} DESTINATION "${ALP_WWW_INSTALL_DIR}/webgpu_app")
     # ================================================
 endif()

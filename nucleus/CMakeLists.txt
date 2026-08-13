@@ -22,7 +22,7 @@
 project(alpine-renderer-nucleus LANGUAGES C CXX)
 
 alp_add_git_repository(stb_slim URL https://github.com/AlpineMapsOrgDependencies/stb_slim.git COMMITISH 547fade2a12793e1bea4733d59646b4f436e25a4)
-alp_add_git_repository(radix URL https://github.com/AlpineMapsOrg/radix.git COMMITISH 9720bce6399f4581e35edc88f87651f020348b34 NOT_SYSTEM)
+alp_add_git_repository(radix URL https://github.com/AlpineMapsOrg/radix.git COMMITISH 9d3a4b7a38d1339da015e958c9825eaf6afcb6ae NOT_SYSTEM)
 alp_add_git_repository(zppbits URL https://github.com/eyalz800/zpp_bits.git COMMITISH v4.4.25 DO_NOT_ADD_SUBPROJECT)
 if(ALP_ENABLE_LABELS)
     alp_add_git_repository(vector_tiles URL https://github.com/AlpineMapsOrg/vector-tile.git COMMITISH faba88257716c4bc01ebd44d8b8b98f711ecb78c)
