@@ -392,6 +392,13 @@ template <typename Callable> double measure_finished_gl(Callable&& callable)
     const auto end = std::chrono::steady_clock::now();
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
+
+void collect_gl_errors(std::vector<gl_engine::TextureCompressor::Result::GlError>& errors, gl_engine::TextureCompressor::Stage stage)
+{
+    auto* f = QOpenGLContext::currentContext()->extraFunctions();
+    while (const auto error = f->glGetError())
+        errors.push_back({ stage, error });
+}
 }
 
 struct gl_engine::TextureCompressor::Impl {
@@ -495,7 +502,12 @@ bool gl_engine::TextureCompressor::is_supported()
 {
 #if defined(__EMSCRIPTEN__)
     const auto context = emscripten_webgl_get_current_context();
-    return context && emscripten_webgl_enable_extension(context, "WEBGL_compressed_texture_etc");
+    if (!context)
+        return false;
+    if (emscripten_webgl_enable_extension(context, "WEBGL_compressed_texture_etc"))
+        return true;
+    return emscripten_webgl_enable_extension(context, "WEBGL_compressed_texture_s3tc")
+        && emscripten_webgl_enable_extension(context, "WEBGL_compressed_texture_s3tc_srgb");
 #else
     return true;
 #endif
@@ -542,12 +554,14 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
                 textures[layer].bytes().data());
         }
     });
+    collect_gl_errors(result.gl_errors, Stage::ScratchUpload);
 
     if (settings.generate_mipmaps) {
         result.timings.mipmap_generation_ms = measure_finished_gl([&]() {
             f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
             f->glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
         });
+        collect_gl_errors(result.gl_errors, Stage::MipmapGeneration);
     }
 
     std::vector<size_t> level_offsets;
@@ -598,6 +612,7 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
         f->glBindVertexArray(0);
         program->release();
     });
+    collect_gl_errors(result.gl_errors, Stage::Encoding);
 
     result.timings.compressed_upload_ms = measure_finished_gl([&]() {
         f->glBindTexture(GL_TEXTURE_2D_ARRAY, destination.m_id);
@@ -624,6 +639,7 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
         }
         f->glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
     });
+    collect_gl_errors(result.gl_errors, Stage::CompressedUpload);
 
     f->glActiveTexture(GL_TEXTURE0);
     result.timings.total_ms = result.timings.scratch_upload_ms + result.timings.mipmap_generation_ms + result.timings.encoding_ms

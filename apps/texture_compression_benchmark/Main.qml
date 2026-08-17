@@ -47,7 +47,7 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.leftMargin: 20
                 Layout.rightMargin: 20
-                text: qsTr("Measures DXT1 or ETC1 compression of 512×512 ortho textures, including optional mipmaps and final texture-array upload. WebGL requires WEBGL_compressed_texture_etc.")
+                text: qsTr("Measures DXT1 or ETC1 compression of 512×512 ortho textures, including optional mipmaps and final texture-array upload. WebGL requires ETC or sRGB S3TC compressed textures.")
                 wrapMode: Text.Wrap
             }
 
