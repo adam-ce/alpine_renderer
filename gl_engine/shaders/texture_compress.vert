@@ -23,7 +23,7 @@ highp uint pack_565(highp uvec3 value)
 highp uint colour_error(highp uvec3 lhs, highp uvec3 rhs)
 {
     highp ivec3 delta = ivec3(lhs) - ivec3(rhs);
-    return uint(dot(delta, delta));
+    return uint(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
 }
 
 highp uvec2 encode_dxt1(highp uvec3 pixels[16])
@@ -136,7 +136,7 @@ highp uvec2 encode_etc1(highp uvec3 pixels[16])
                     for (int index = 0; index < 4; ++index) {
                         highp ivec3 reconstructed = clamp(decoded_base + ivec3(modifier(table, index)), ivec3(0), ivec3(255));
                         highp ivec3 delta = ivec3(pixels[pixel_index]) - reconstructed;
-                        highp uint error = uint(dot(delta, delta));
+                        highp uint error = uint(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
                         if (error < selected_error) {
                             selected = uint(index);
                             selected_error = error;
