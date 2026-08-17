@@ -18,6 +18,9 @@
 
 #include <QPainter>
 #include <QtAssert>
+#include <array>
+#include <cmath>
+#include <limits>
 #include <catch2/catch_test_macros.hpp>
 
 #include "UnittestGLContext.h"
@@ -276,6 +279,35 @@ QImage create_test_rgba_qimage(unsigned width, unsigned height)
     return test_texture;
 }
 radix::Raster<glm::u8vec4> create_test_rgba_raster(unsigned width, unsigned height) { return nucleus::tile::conversion::to_rgba8raster(create_test_rgba_qimage(width, height)); }
+
+double srgb_to_linear(uint8_t value)
+{
+    const auto normalised = double(value) / 255.0;
+    if (normalised <= 0.04045)
+        return normalised / 12.92;
+    return std::pow((normalised + 0.055) / 1.055, 2.4);
+}
+
+double linear_psnr(const QImage& reconstructed, const radix::Raster<glm::u8vec4>& source)
+{
+    double squared_error = 0.0;
+    for (int y = 0; y < reconstructed.height(); ++y) {
+        for (int x = 0; x < reconstructed.width(); ++x) {
+            const auto actual = reconstructed.pixel(x, y);
+            const auto expected = source.pixel({ x, y });
+            const std::array<double, 3> actual_channels { qRed(actual) / 255.0, qGreen(actual) / 255.0, qBlue(actual) / 255.0 };
+            const std::array<double, 3> expected_channels {
+                srgb_to_linear(expected.x), srgb_to_linear(expected.y), srgb_to_linear(expected.z)
+            };
+            for (size_t channel = 0; channel < actual_channels.size(); ++channel) {
+                const auto difference = actual_channels[channel] - expected_channels[channel];
+                squared_error += difference * difference;
+            }
+        }
+    }
+    const auto mse = squared_error / double(reconstructed.width() * reconstructed.height() * 3);
+    return mse == 0.0 ? std::numeric_limits<double>::infinity() : 10.0 * std::log10(1.0 / mse);
+}
 
 } // namespace
 
@@ -655,4 +687,68 @@ TEST_CASE("gl texture")
             CHECK(qAlpha(render_result.pixel(0, 0)) == 255);
         }
     }
+}
+
+TEST_CASE("gl texture GPU compression quality")
+{
+    constexpr unsigned resolution = 64;
+    auto detailed = create_test_rgba_raster(resolution, resolution);
+    auto constant = radix::Raster<glm::u8vec4>(glm::uvec2(resolution), glm::u8vec4(42, 142, 242, 255));
+    std::vector<radix::Raster<glm::u8vec4>> sources;
+    sources.push_back(detailed);
+    sources.push_back(constant);
+
+    gl_engine::Texture destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
+    destination.setParams(gl_engine::Texture::Filter::MipMapLinear, gl_engine::Texture::Filter::Nearest);
+    destination.allocate_array(resolution, resolution, unsigned(sources.size()));
+
+    gl_engine::TextureCompressor compressor(resolution, resolution, unsigned(sources.size()));
+    const std::array<unsigned, 2> destination_layers { 0, 1 };
+    const auto result = compressor.compress(sources,
+        destination,
+        destination_layers,
+        { .algorithm = gl_engine::Texture::compression_algorithm(), .effort = 4, .generate_mipmaps = true });
+    size_t expected_size = 0;
+    for (unsigned level = 0; level < gl_engine::TextureCompressor::mip_level_count(resolution, resolution); ++level) {
+        expected_size += gl_engine::TextureCompressor::compressed_level_size(
+            std::max(1u, resolution >> level), std::max(1u, resolution >> level));
+    }
+    CHECK(result.encoded_bytes == expected_size * sources.size());
+    CHECK(result.mip_levels == 7);
+    CHECK(result.timings.total_ms > 0.0);
+
+    Framebuffer framebuffer(Framebuffer::DepthFormat::None, { Framebuffer::ColourFormat::RGBA8 }, { resolution, resolution });
+    framebuffer.bind();
+    ShaderProgram shader = create_debug_shader(R"(
+        uniform lowp sampler2DArray texture_sampler;
+        uniform highp int texture_layer;
+        uniform highp int mip_level;
+        in highp vec2 texcoords;
+        out lowp vec4 out_color;
+        void main() {
+            out_color = textureLod(texture_sampler, vec3(texcoords.x, 1.0 - texcoords.y, float(texture_layer)), float(mip_level));
+        }
+    )");
+    shader.bind();
+    destination.bind(0);
+    shader.set_uniform("texture_sampler", 0);
+    shader.set_uniform("mip_level", 0);
+    for (int layer = 0; layer < int(sources.size()); ++layer) {
+        shader.set_uniform("texture_layer", layer);
+        gl_engine::helpers::create_screen_quad_geometry().draw();
+        const auto reconstructed = framebuffer.read_colour_attachment(0);
+        const auto psnr = linear_psnr(reconstructed, sources[size_t(layer)]);
+        CAPTURE(layer, psnr);
+        CHECK(psnr > 12.0);
+    }
+    shader.set_uniform("texture_layer", 1);
+    for (int level = 1; level < int(result.mip_levels); ++level) {
+        shader.set_uniform("mip_level", level);
+        gl_engine::helpers::create_screen_quad_geometry().draw();
+        const auto reconstructed = framebuffer.read_colour_attachment(0);
+        const auto psnr = linear_psnr(reconstructed, constant);
+        CAPTURE(level, psnr);
+        CHECK(psnr > 20.0);
+    }
+    Framebuffer::unbind();
 }

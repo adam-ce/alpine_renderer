@@ -87,6 +87,8 @@ qt_add_resources(gl_engine "shaders"
     shaders/tile_id.glsl
     shaders/track.frag
     shaders/track.vert
+    shaders/texture_compress.frag
+    shaders/texture_compress.vert
     shaders/turbo_colormap.glsl
     shaders/intersection.glsl
     shaders/eaws.glsl

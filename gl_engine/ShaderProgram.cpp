@@ -177,11 +177,16 @@ QString ShaderProgram::read_file_content_local(const QString& name) {
 
 // =========== MEMBER DECLARATIONS =======================
 
-ShaderProgram::ShaderProgram(QString vertex_shader, QString fragment_shader, ShaderCodeSource code_source, const std::vector<QString>& defines)
+ShaderProgram::ShaderProgram(QString vertex_shader,
+    QString fragment_shader,
+    ShaderCodeSource code_source,
+    const std::vector<QString>& defines,
+    const std::vector<QByteArray>& transform_feedback_varyings)
     : m_vertex_shader(vertex_shader)
     , m_fragment_shader(fragment_shader)
     , m_code_source(code_source)
     , m_defines(defines)
+    , m_transform_feedback_varyings(transform_feedback_varyings)
 {
     reload();
     Q_ASSERT(m_q_shader_program);
@@ -320,21 +325,30 @@ void ShaderProgram::reload()
         outputMeaningfullErrors(program->log(), vertexCode, m_vertex_shader);
     } else if (!program->addShaderFromSourceCode(QOpenGLShader::Fragment, fragmentCode)) {
         outputMeaningfullErrors(program->log(), fragmentCode, m_fragment_shader);
-    } else if (!program->link()) {
-#ifdef _MSC_VER
-        // when using msvc in github ci qDebug/Critical don't print when an assert fails
-        // effectively, we don't see any error
-        std::cerr << "error linking shader " << m_vertex_shader.toStdString() << "and" << m_fragment_shader.toStdString() << std::endl;
-        fflush(stderr);
-        fflush(stdout);
-#else
-        qCritical() << "error linking shader " << m_vertex_shader.toStdString() << "and" << m_fragment_shader.toStdString();
-#endif
     } else {
-        // NO ERROR
-        m_q_shader_program = std::move(program);
-        m_cached_attribs.clear();
-        m_cached_uniforms.clear();
+        if (!m_transform_feedback_varyings.empty()) {
+            std::vector<const GLchar*> varyings;
+            varyings.reserve(m_transform_feedback_varyings.size());
+            for (const auto& varying : m_transform_feedback_varyings)
+                varyings.push_back(varying.constData());
+            QOpenGLContext::currentContext()->extraFunctions()->glTransformFeedbackVaryings(
+                program->programId(), GLsizei(varyings.size()), varyings.data(), GL_INTERLEAVED_ATTRIBS);
+        }
+        if (!program->link()) {
+#ifdef _MSC_VER
+            // when using msvc in github ci qDebug/Critical don't print when an assert fails
+            // effectively, we don't see any error
+            std::cerr << "error linking shader " << m_vertex_shader.toStdString() << "and" << m_fragment_shader.toStdString() << std::endl;
+            fflush(stderr);
+            fflush(stdout);
+#else
+            qCritical() << "error linking shader " << m_vertex_shader.toStdString() << "and" << m_fragment_shader.toStdString();
+#endif
+        } else {
+            m_q_shader_program = std::move(program);
+            m_cached_attribs.clear();
+            m_cached_uniforms.clear();
+        }
     }
 }
 

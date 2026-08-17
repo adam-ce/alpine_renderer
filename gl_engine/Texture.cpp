@@ -17,11 +17,16 @@
  *****************************************************************************/
 
 #include "Texture.h"
+#include "ShaderProgram.h"
 #include "nucleus/utils/ColourTexture.h"
 
 #include <QOpenGLExtraFunctions>
 #include <QOpenGLFunctions>
 #include <QtAssert>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <utility>
 #ifdef __EMSCRIPTEN__
 #include <emscripten/html5_webgl.h>
 #endif
@@ -376,4 +381,252 @@ float gl_engine::Texture::max_anisotropy()
     }();
     return max_anisotropy;
 #endif
+}
+
+namespace {
+template <typename Callable> double measure_finished_gl(Callable&& callable)
+{
+    const auto start = std::chrono::steady_clock::now();
+    std::forward<Callable>(callable)();
+    QOpenGLContext::currentContext()->extraFunctions()->glFinish();
+    const auto end = std::chrono::steady_clock::now();
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+}
+
+struct gl_engine::TextureCompressor::Impl {
+    unsigned width = 0;
+    unsigned height = 0;
+    unsigned max_batch_size = 0;
+    unsigned scratch_layers = 0;
+    GLuint scratch_texture = 0;
+    GLuint encoded_buffer = 0;
+    GLuint vertex_array = 0;
+    GLuint transform_feedback = 0;
+    std::unique_ptr<ShaderProgram> dxt1_program;
+    std::unique_ptr<ShaderProgram> etc1_program;
+
+    Impl(unsigned texture_width, unsigned texture_height, unsigned maximum_batch_size)
+        : width(texture_width)
+        , height(texture_height)
+        , max_batch_size(maximum_batch_size)
+    {
+        Q_ASSERT(width > 0 && height > 0 && max_batch_size > 0);
+        auto* f = QOpenGLContext::currentContext()->extraFunctions();
+        f->glGenBuffers(1, &encoded_buffer);
+        f->glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, encoded_buffer);
+        size_t maximum_size = 0;
+        for (unsigned level = 0; level < TextureCompressor::mip_level_count(width, height); ++level) {
+            maximum_size += TextureCompressor::compressed_level_size(
+                std::max(1u, width >> level), std::max(1u, height >> level));
+        }
+        maximum_size *= max_batch_size;
+        f->glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, GLsizeiptr(maximum_size), nullptr, GL_STREAM_DRAW);
+        f->glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+        f->glGenVertexArrays(1, &vertex_array);
+        f->glGenTransformFeedbacks(1, &transform_feedback);
+
+        const std::vector<QByteArray> varyings { QByteArrayLiteral("encoded_block") };
+        dxt1_program = std::make_unique<ShaderProgram>(
+            "texture_compress.vert", "texture_compress.frag", ShaderCodeSource::FILE, std::vector<QString> {}, varyings);
+        etc1_program = std::make_unique<ShaderProgram>("texture_compress.vert",
+            "texture_compress.frag",
+            ShaderCodeSource::FILE,
+            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1") },
+            varyings);
+    }
+
+    ~Impl()
+    {
+        dxt1_program.reset();
+        etc1_program.reset();
+        if (!QOpenGLContext::currentContext())
+            return;
+        auto* f = QOpenGLContext::currentContext()->extraFunctions();
+        f->glDeleteTransformFeedbacks(1, &transform_feedback);
+        f->glDeleteVertexArrays(1, &vertex_array);
+        f->glDeleteBuffers(1, &encoded_buffer);
+        if (scratch_texture)
+            f->glDeleteTextures(1, &scratch_texture);
+    }
+
+    void ensure_scratch_storage(unsigned layers)
+    {
+        if (scratch_layers == layers)
+            return;
+        auto* f = QOpenGLContext::currentContext()->extraFunctions();
+        if (scratch_texture)
+            f->glDeleteTextures(1, &scratch_texture);
+        f->glGenTextures(1, &scratch_texture);
+        f->glBindTexture(GL_TEXTURE_2D_ARRAY, scratch_texture);
+        f->glTexStorage3D(GL_TEXTURE_2D_ARRAY,
+            GLsizei(TextureCompressor::mip_level_count(width, height)),
+            GL_RGBA8,
+            GLsizei(width),
+            GLsizei(height),
+            GLsizei(layers));
+        f->glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+        f->glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        f->glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        f->glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        scratch_layers = layers;
+    }
+};
+
+gl_engine::TextureCompressor::TextureCompressor(unsigned width, unsigned height, unsigned max_batch_size)
+    : m(std::make_unique<Impl>(width, height, max_batch_size))
+{
+}
+
+gl_engine::TextureCompressor::~TextureCompressor() = default;
+
+size_t gl_engine::TextureCompressor::compressed_level_size(unsigned width, unsigned height)
+{
+    return size_t(std::max(1u, (width + 3) / 4)) * std::max(1u, (height + 3) / 4) * 8;
+}
+
+unsigned gl_engine::TextureCompressor::mip_level_count(unsigned width, unsigned height)
+{
+    Q_ASSERT(width > 0 && height > 0);
+    return 1u + unsigned(std::floor(std::log2(std::max(width, height))));
+}
+
+bool gl_engine::TextureCompressor::is_supported()
+{
+#if defined(__EMSCRIPTEN__)
+    const auto context = emscripten_webgl_get_current_context();
+    return context && emscripten_webgl_enable_extension(context, "WEBGL_compressed_texture_etc");
+#else
+    return true;
+#endif
+}
+
+gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std::span<const radix::Raster<glm::u8vec4>> textures,
+    Texture& destination,
+    std::span<const unsigned> destination_layers,
+    const Settings& settings)
+{
+    Q_ASSERT(is_supported());
+    Q_ASSERT(!textures.empty());
+    Q_ASSERT(textures.size() == destination_layers.size());
+    Q_ASSERT(textures.size() <= m->max_batch_size);
+    Q_ASSERT(destination.m_target == Texture::Target::_2dArray);
+    Q_ASSERT(destination.m_format == Texture::Format::CompressedRGBA8);
+    Q_ASSERT(destination.m_width == m->width && destination.m_height == m->height);
+    Q_ASSERT(settings.algorithm == Texture::compression_algorithm());
+    Q_ASSERT(settings.effort <= 10);
+    for (size_t i = 0; i < textures.size(); ++i) {
+        Q_ASSERT(unsigned(textures[i].width()) == m->width && unsigned(textures[i].height()) == m->height);
+        Q_ASSERT(destination_layers[i] < destination.m_n_layers);
+    }
+
+    m->ensure_scratch_storage(unsigned(textures.size()));
+    auto* f = QOpenGLContext::currentContext()->extraFunctions();
+    Result result;
+    result.mip_levels = settings.generate_mipmaps ? mip_level_count(m->width, m->height) : 1;
+
+    result.timings.scratch_upload_ms = measure_finished_gl([&]() {
+        f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
+        f->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        for (size_t layer = 0; layer < textures.size(); ++layer) {
+            f->glTexSubImage3D(GL_TEXTURE_2D_ARRAY,
+                0,
+                0,
+                0,
+                GLint(layer),
+                GLsizei(m->width),
+                GLsizei(m->height),
+                1,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                textures[layer].bytes().data());
+        }
+    });
+
+    if (settings.generate_mipmaps) {
+        result.timings.mipmap_generation_ms = measure_finished_gl([&]() {
+            f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
+            f->glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+        });
+    }
+
+    std::vector<size_t> level_offsets;
+    level_offsets.reserve(result.mip_levels);
+    size_t total_encoded_size = 0;
+    for (unsigned level = 0; level < result.mip_levels; ++level) {
+        level_offsets.push_back(total_encoded_size);
+        const auto level_width = std::max(1u, m->width >> level);
+        const auto level_height = std::max(1u, m->height >> level);
+        total_encoded_size += compressed_level_size(level_width, level_height) * textures.size();
+    }
+    result.encoded_bytes = total_encoded_size;
+
+    result.timings.encoding_ms = measure_finished_gl([&]() {
+        auto* program = settings.algorithm == nucleus::utils::ColourTexture::Format::DXT1 ? m->dxt1_program.get() : m->etc1_program.get();
+        program->bind();
+        program->set_uniform("source_texture", 7);
+        program->set_uniform("effort", int(settings.effort));
+        f->glActiveTexture(GL_TEXTURE7);
+        f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
+        f->glBindVertexArray(m->vertex_array);
+        f->glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, m->transform_feedback);
+        f->glEnable(GL_RASTERIZER_DISCARD);
+
+        for (unsigned level = 0; level < result.mip_levels; ++level) {
+            const auto level_width = std::max(1u, m->width >> level);
+            const auto level_height = std::max(1u, m->height >> level);
+            const auto blocks_x = std::max(1u, (level_width + 3) / 4);
+            const auto blocks_y = std::max(1u, (level_height + 3) / 4);
+            const auto level_size = compressed_level_size(level_width, level_height) * textures.size();
+            program->set_uniform("texture_width", int(level_width));
+            program->set_uniform("texture_height", int(level_height));
+            program->set_uniform("blocks_x", int(blocks_x));
+            program->set_uniform("blocks_y", int(blocks_y));
+            program->set_uniform("mip_level", int(level));
+            f->glBindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER,
+                0,
+                m->encoded_buffer,
+                GLintptr(level_offsets[level]),
+                GLsizeiptr(level_size));
+            f->glBeginTransformFeedback(GL_POINTS);
+            f->glDrawArrays(GL_POINTS, 0, GLsizei(blocks_x * blocks_y * textures.size()));
+            f->glEndTransformFeedback();
+        }
+
+        f->glDisable(GL_RASTERIZER_DISCARD);
+        f->glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
+        f->glBindVertexArray(0);
+        program->release();
+    });
+
+    result.timings.compressed_upload_ms = measure_finished_gl([&]() {
+        f->glBindTexture(GL_TEXTURE_2D_ARRAY, destination.m_id);
+        f->glBindBuffer(GL_PIXEL_UNPACK_BUFFER, m->encoded_buffer);
+        const auto format = Texture::compressed_texture_format();
+        for (unsigned level = 0; level < result.mip_levels; ++level) {
+            const auto level_width = std::max(1u, m->width >> level);
+            const auto level_height = std::max(1u, m->height >> level);
+            const auto layer_size = compressed_level_size(level_width, level_height);
+            for (size_t layer = 0; layer < textures.size(); ++layer) {
+                const auto offset = level_offsets[level] + layer_size * layer;
+                f->glCompressedTexSubImage3D(GL_TEXTURE_2D_ARRAY,
+                    GLint(level),
+                    0,
+                    0,
+                    GLint(destination_layers[layer]),
+                    GLsizei(level_width),
+                    GLsizei(level_height),
+                    1,
+                    format,
+                    GLsizei(layer_size),
+                    reinterpret_cast<const void*>(quintptr(offset)));
+            }
+        }
+        f->glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    });
+
+    f->glActiveTexture(GL_TEXTURE0);
+    result.timings.total_ms = result.timings.scratch_upload_ms + result.timings.mipmap_generation_ms + result.timings.encoding_ms
+        + result.timings.compressed_upload_ms;
+    return result;
 }

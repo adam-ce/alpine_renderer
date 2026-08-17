@@ -20,7 +20,10 @@
 
 #include <QImage>
 #include <cstdint>
+#include <memory>
 #include <qopengl.h>
+#include <span>
+#include <vector>
 #ifdef ANDROID
 #include <GLES3/gl3.h>
 #endif
@@ -28,6 +31,8 @@
 #include <nucleus/utils/ColourTexture.h>
 
 namespace gl_engine {
+class TextureCompressor;
+
 class Texture {
 public:
     enum class Target : GLenum { _2d = GL_TEXTURE_2D, _2dArray = GL_TEXTURE_2D_ARRAY }; // no 1D textures in webgl
@@ -72,6 +77,8 @@ protected:
     static float max_anisotropy();
 
 private:
+    friend class TextureCompressor;
+
     GLuint m_id = GLuint(-1);
     Target m_target = Target::_2d;
     Format m_format = Format::Invalid;
@@ -80,6 +87,49 @@ private:
     unsigned m_width = unsigned(-1);
     unsigned m_height = unsigned(-1);
     unsigned m_n_layers = unsigned(-1);
+};
+
+class TextureCompressor {
+public:
+    struct Settings {
+        nucleus::utils::ColourTexture::Format algorithm = nucleus::utils::ColourTexture::Format::DXT1;
+        unsigned effort = 0;
+        bool generate_mipmaps = true;
+    };
+
+    struct Timings {
+        double scratch_upload_ms = 0.0;
+        double mipmap_generation_ms = 0.0;
+        double encoding_ms = 0.0;
+        double compressed_upload_ms = 0.0;
+        double total_ms = 0.0;
+    };
+
+    struct Result {
+        Timings timings;
+        size_t encoded_bytes = 0;
+        unsigned mip_levels = 0;
+    };
+
+    TextureCompressor(unsigned width, unsigned height, unsigned max_batch_size);
+    ~TextureCompressor();
+    TextureCompressor(const TextureCompressor&) = delete;
+    TextureCompressor(TextureCompressor&&) = delete;
+    TextureCompressor& operator=(const TextureCompressor&) = delete;
+    TextureCompressor& operator=(TextureCompressor&&) = delete;
+
+    [[nodiscard]] Result compress(std::span<const radix::Raster<glm::u8vec4>> textures,
+        Texture& destination,
+        std::span<const unsigned> destination_layers,
+        const Settings& settings);
+
+    [[nodiscard]] static size_t compressed_level_size(unsigned width, unsigned height);
+    [[nodiscard]] static unsigned mip_level_count(unsigned width, unsigned height);
+    [[nodiscard]] static bool is_supported();
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> m;
 };
 
 extern template void gl_engine::Texture::upload<uint16_t>(const radix::Raster<uint16_t>&);
