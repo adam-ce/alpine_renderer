@@ -737,6 +737,22 @@ TEST_CASE("gl texture GPU compression quality")
     CHECK(profiled_result.timings.total_ms > 0.0);
     CHECK(f->glGetError() == GL_NO_ERROR);
 
+    const auto submitted_result = compressor.compress(sources,
+        destination,
+        destination_layers,
+        { .algorithm = gl_engine::Texture::compression_algorithm(),
+            .effort = 4,
+            .generate_mipmaps = true,
+            .timing_mode = gl_engine::TextureCompressor::TimingMode::SubmissionOnly });
+    CHECK(submitted_result.timings.scratch_upload.completion_wait_ms == 0.0);
+    CHECK(submitted_result.timings.mipmap_generation.completion_wait_ms == 0.0);
+    CHECK(submitted_result.timings.compression_pass.completion_wait_ms == 0.0);
+    CHECK(submitted_result.timings.packing_pass.completion_wait_ms == 0.0);
+    CHECK(submitted_result.timings.output_transfer.completion_wait_ms == 0.0);
+    CHECK(submitted_result.timings.compressed_upload.completion_wait_ms == 0.0);
+    f->glFinish();
+    CHECK(f->glGetError() == GL_NO_ERROR);
+
     Framebuffer framebuffer(Framebuffer::DepthFormat::None, { Framebuffer::ColourFormat::RGBA8 }, { resolution, resolution });
     framebuffer.bind();
     ShaderProgram shader = create_debug_shader(R"(

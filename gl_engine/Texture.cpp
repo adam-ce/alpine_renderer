@@ -392,8 +392,13 @@ template <typename Callable> gl_engine::TextureCompressor::StageTiming measure_g
     const auto start = std::chrono::steady_clock::now();
     std::forward<Callable>(callable)();
     const auto submitted = std::chrono::steady_clock::now();
-    if (finish)
-        QOpenGLContext::currentContext()->extraFunctions()->glFinish();
+    if (!finish) {
+        return {
+            std::chrono::duration<double, std::milli>(submitted - start).count(),
+            0.0,
+        };
+    }
+    QOpenGLContext::currentContext()->extraFunctions()->glFinish();
     const auto completed = std::chrono::steady_clock::now();
     return {
         std::chrono::duration<double, std::milli>(submitted - start).count(),
@@ -902,6 +907,7 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
     Result result;
     result.mip_levels = settings.generate_mipmaps ? mip_level_count(m->width, m->height) : 1;
     const bool finish_stages = settings.timing_mode == TimingMode::IndividualStages;
+    const bool finish_total = settings.timing_mode == TimingMode::EndToEnd;
     const auto total_start = std::chrono::steady_clock::now();
     auto* gpu_timer = settings.gpu_timer && settings.gpu_timer->is_supported() ? settings.gpu_timer : nullptr;
     if (gpu_timer)
@@ -1119,7 +1125,7 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
     if (gpu_timer)
         gpu_timer->end_sample();
     f->glActiveTexture(GL_TEXTURE0);
-    if (!finish_stages)
+    if (finish_total)
         f->glFinish();
     result.timings.total_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - total_start).count();
     return result;

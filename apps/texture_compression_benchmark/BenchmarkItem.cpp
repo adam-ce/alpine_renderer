@@ -34,6 +34,9 @@
 #include <gl_engine/helpers.h>
 #include <nucleus/tile/conversion.h>
 #include <nucleus/utils/ColourTexture.h>
+#if defined(__EMSCRIPTEN__)
+#include <webgl/webgl2.h>
+#endif
 
 namespace {
 using Raster = radix::Raster<glm::u8vec4>;
@@ -104,6 +107,33 @@ struct WallTimingSamples {
     }
 };
 
+struct PendingFenceDiagnostic {
+    std::unique_ptr<gl_engine::TextureCompressor> compressor;
+    std::unique_ptr<gl_engine::Texture> destination;
+    std::unique_ptr<gl_engine::Framebuffer> probe_framebuffer;
+    std::unique_ptr<gl_engine::ShaderProgram> probe_shader;
+    gl_engine::helpers::ScreenQuadGeometry probe_geometry;
+    std::vector<Raster> sources;
+    std::vector<unsigned> layers;
+    gl_engine::TextureCompressor::Settings settings;
+    GLsync fence = nullptr;
+    Clock::time_point started_at;
+    int iteration = 0;
+    int iteration_count = 0;
+    int current_poll_count = 0;
+    GLenum wait_error = GL_NO_ERROR;
+    double failure_elapsed_ms = 0.0;
+    QString status = QStringLiteral("pending");
+    std::vector<double> submission_ms;
+    std::vector<double> fence_completion_ms;
+    std::vector<double> verification_readback_ms;
+    std::vector<double> verified_end_to_end_ms;
+    std::vector<int> poll_counts;
+    std::vector<QString> sample_checksums;
+    std::vector<glm::u8vec4> last_source_markers;
+    std::vector<glm::u8vec4> last_sampled_pixels;
+};
+
 struct PendingGpuReport {
     QJsonObject root;
     QStringList summary;
@@ -111,6 +141,7 @@ struct PendingGpuReport {
     std::vector<std::optional<gl_engine::TextureCompressor::GpuTimings>> query_results;
     std::vector<bool> query_finished;
     int disjoint_samples = 0;
+    std::optional<PendingFenceDiagnostic> fence_diagnostic;
 };
 
 double elapsed_ms(Clock::time_point start)
@@ -199,6 +230,51 @@ QString gl_string(GLenum name)
     return value ? QString::fromLatin1(reinterpret_cast<const char*>(value)) : QStringLiteral("unavailable");
 }
 
+QJsonArray pixels_to_json(const std::vector<glm::u8vec4>& pixels)
+{
+    QJsonArray result;
+    for (const auto& pixel : pixels) {
+        result.append(QJsonArray { int(pixel.x), int(pixel.y), int(pixel.z), int(pixel.w) });
+    }
+    return result;
+}
+
+GLsync create_gpu_fence(QOpenGLExtraFunctions* f)
+{
+#if defined(__EMSCRIPTEN__)
+    static_cast<void>(f);
+    return emscripten_glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+#else
+    return f->glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+#endif
+}
+
+void flush_gpu_commands(QOpenGLExtraFunctions* f)
+{
+    f->glFlush();
+}
+
+GLenum poll_gpu_fence(QOpenGLExtraFunctions* f, GLsync fence)
+{
+#if defined(__EMSCRIPTEN__)
+    GLint status = GL_UNSIGNALED;
+    f->glGetSynciv(fence, GL_SYNC_STATUS, 1, nullptr, &status);
+    return status == GL_SIGNALED ? GL_ALREADY_SIGNALED : GL_TIMEOUT_EXPIRED;
+#else
+    return f->glClientWaitSync(fence, 0, 0);
+#endif
+}
+
+void delete_gpu_fence(QOpenGLExtraFunctions* f, GLsync fence)
+{
+#if defined(__EMSCRIPTEN__)
+    static_cast<void>(f);
+    emscripten_glDeleteSync(fence);
+#else
+    f->glDeleteSync(fence);
+#endif
+}
+
 } // namespace
 
 class BenchmarkRenderer final : public QQuickFramebufferObject::Renderer {
@@ -256,16 +332,189 @@ public:
 private:
     void request_another_frame()
     {
-        QPointer<BenchmarkItem> item = m_item;
-        QMetaObject::invokeMethod(m_item, [item]() {
-            if (item)
-                item->update();
+        update();
+        QPointer<QQuickWindow> window = m_window;
+        QMetaObject::invokeMethod(m_window, [window]() {
+            if (window)
+                window->update();
         });
+    }
+
+    void begin_fence_sample(PendingFenceDiagnostic& diagnostic)
+    {
+        diagnostic.last_source_markers.clear();
+        diagnostic.last_source_markers.reserve(diagnostic.sources.size());
+        for (size_t layer = 0; layer < diagnostic.sources.size(); ++layer) {
+            const auto marker = glm::u8vec4(uint8_t((37 + 53 * layer + 29 * size_t(diagnostic.iteration)) % 256),
+                uint8_t((83 + 97 * layer + 47 * size_t(diagnostic.iteration)) % 256),
+                uint8_t((149 + 31 * layer + 71 * size_t(diagnostic.iteration)) % 256),
+                255);
+            diagnostic.last_source_markers.push_back(marker);
+            const auto centre = diagnostic.sources[layer].size() / 2u;
+            for (unsigned y = centre.y - 8; y < centre.y + 8; ++y) {
+                for (unsigned x = centre.x - 8; x < centre.x + 8; ++x)
+                    diagnostic.sources[layer].pixel({ x, y }) = marker;
+            }
+        }
+
+        diagnostic.started_at = Clock::now();
+        static_cast<void>(diagnostic.compressor->compress(
+            diagnostic.sources, *diagnostic.destination, diagnostic.layers, diagnostic.settings));
+        auto* f = QOpenGLContext::currentContext()->extraFunctions();
+        diagnostic.fence = create_gpu_fence(f);
+        flush_gpu_commands(f);
+        diagnostic.submission_ms.push_back(elapsed_ms(diagnostic.started_at));
+        diagnostic.current_poll_count = 0;
+        if (!diagnostic.fence) {
+            diagnostic.status = QStringLiteral("fence_creation_failed");
+            diagnostic.wait_error = f->glGetError();
+        }
+    }
+
+    QImage read_fence_probe(PendingFenceDiagnostic& diagnostic)
+    {
+        diagnostic.probe_framebuffer->bind();
+        diagnostic.probe_shader->bind();
+        diagnostic.destination->bind(0);
+        diagnostic.probe_shader->set_uniform("texture_sampler", 0);
+        diagnostic.probe_geometry.draw();
+        auto image = diagnostic.probe_framebuffer->read_colour_attachment(0);
+        gl_engine::Framebuffer::unbind();
+        return image;
+    }
+
+    bool poll_fence_diagnostic(PendingFenceDiagnostic& diagnostic)
+    {
+        if (diagnostic.status != QStringLiteral("pending"))
+            return true;
+
+        ++diagnostic.current_poll_count;
+        auto* f = QOpenGLContext::currentContext()->extraFunctions();
+        const auto wait_status = poll_gpu_fence(f, diagnostic.fence);
+        if (wait_status == GL_TIMEOUT_EXPIRED && elapsed_ms(diagnostic.started_at) < 5000.0)
+            return false;
+        if (wait_status == GL_TIMEOUT_EXPIRED) {
+            diagnostic.status = QStringLiteral("fence_timeout");
+            diagnostic.failure_elapsed_ms = elapsed_ms(diagnostic.started_at);
+            delete_gpu_fence(f, diagnostic.fence);
+            diagnostic.fence = nullptr;
+            return true;
+        }
+        if (wait_status == GL_WAIT_FAILED) {
+            diagnostic.status = QStringLiteral("client_wait_failed");
+            diagnostic.wait_error = f->glGetError();
+            delete_gpu_fence(f, diagnostic.fence);
+            diagnostic.fence = nullptr;
+            return true;
+        }
+        if (wait_status != GL_ALREADY_SIGNALED && wait_status != GL_CONDITION_SATISFIED) {
+            diagnostic.status = QStringLiteral("unexpected_wait_status");
+            diagnostic.wait_error = wait_status;
+            delete_gpu_fence(f, diagnostic.fence);
+            diagnostic.fence = nullptr;
+            return true;
+        }
+
+        diagnostic.fence_completion_ms.push_back(elapsed_ms(diagnostic.started_at));
+        diagnostic.poll_counts.push_back(diagnostic.current_poll_count);
+        delete_gpu_fence(f, diagnostic.fence);
+        diagnostic.fence = nullptr;
+
+        const auto readback_start = Clock::now();
+        const auto sampled = read_fence_probe(diagnostic);
+        diagnostic.verification_readback_ms.push_back(elapsed_ms(readback_start));
+        diagnostic.verified_end_to_end_ms.push_back(elapsed_ms(diagnostic.started_at));
+
+        uint64_t checksum = 14695981039346656037ull;
+        diagnostic.last_sampled_pixels.clear();
+        diagnostic.last_sampled_pixels.reserve(size_t(sampled.width()));
+        for (int x = 0; x < sampled.width(); ++x) {
+            const auto pixel = sampled.pixel(x, 0);
+            const auto rgba = glm::u8vec4(qRed(pixel), qGreen(pixel), qBlue(pixel), qAlpha(pixel));
+            diagnostic.last_sampled_pixels.push_back(rgba);
+            for (const auto channel : { rgba.x, rgba.y, rgba.z, rgba.w }) {
+                checksum ^= channel;
+                checksum *= 1099511628211ull;
+            }
+        }
+        diagnostic.sample_checksums.push_back(QStringLiteral("0x%1").arg(checksum, 16, 16, QLatin1Char('0')));
+
+        ++diagnostic.iteration;
+        if (diagnostic.iteration < diagnostic.iteration_count) {
+            begin_fence_sample(diagnostic);
+            return false;
+        }
+        diagnostic.status = QStringLiteral("valid");
+        return true;
+    }
+
+    void append_fence_report(PendingGpuReport& report, const PendingFenceDiagnostic& diagnostic)
+    {
+        QJsonArray poll_counts;
+        for (const auto count : diagnostic.poll_counts)
+            poll_counts.append(count);
+        QJsonArray checksums;
+        for (const auto& checksum : diagnostic.sample_checksums)
+            checksums.append(checksum);
+
+        QJsonObject json {
+            { QStringLiteral("supported"), true },
+            { QStringLiteral("status"), diagnostic.status },
+            { QStringLiteral("requested_samples"), diagnostic.iteration_count },
+            { QStringLiteral("completed_samples"), int(diagnostic.verified_end_to_end_ms.size()) },
+            { QStringLiteral("timing_method"),
+                QStringLiteral("glFenceSync + later-frame nonblocking status polling; dependent sampled-texture CPU readback") },
+            { QStringLiteral("wait_error"), int(diagnostic.wait_error) },
+            { QStringLiteral("watchdog_ms"), 5000 },
+            { QStringLiteral("failure_elapsed_ms"), diagnostic.failure_elapsed_ms },
+            { QStringLiteral("poll_counts"), poll_counts },
+            { QStringLiteral("sample_checksums_fnv1a64"), checksums },
+            { QStringLiteral("last_source_markers_srgb8"), pixels_to_json(diagnostic.last_source_markers) },
+            { QStringLiteral("last_sampled_layers_linear_rgba8"), pixels_to_json(diagnostic.last_sampled_pixels) },
+        };
+        if (!diagnostic.verified_end_to_end_ms.empty()) {
+            json.insert(QStringLiteral("submission"), to_json(statistics(diagnostic.submission_ms)));
+            json.insert(QStringLiteral("fence_completion"), to_json(statistics(diagnostic.fence_completion_ms)));
+            json.insert(QStringLiteral("verification_readback"), to_json(statistics(diagnostic.verification_readback_ms)));
+            json.insert(QStringLiteral("verified_end_to_end"), to_json(statistics(diagnostic.verified_end_to_end_ms)));
+            json.insert(QStringLiteral("raw_samples_ms"),
+                QJsonObject {
+                    { QStringLiteral("submission"), samples_to_json(diagnostic.submission_ms) },
+                    { QStringLiteral("fence_completion"), samples_to_json(diagnostic.fence_completion_ms) },
+                    { QStringLiteral("verification_readback"), samples_to_json(diagnostic.verification_readback_ms) },
+                    { QStringLiteral("verified_end_to_end"), samples_to_json(diagnostic.verified_end_to_end_ms) },
+                });
+            report.summary.push_back(QString());
+            report.summary.push_back(QStringLiteral("Fence + dependent readback verification"));
+            report.summary.push_back(QStringLiteral("Fence completion             median %1 ms")
+                    .arg(statistics(diagnostic.fence_completion_ms).median, 8, 'f', 3));
+            report.summary.push_back(QStringLiteral("Verified end-to-end          median %1 ms")
+                    .arg(statistics(diagnostic.verified_end_to_end_ms).median, 8, 'f', 3));
+        }
+        report.root.insert(QStringLiteral("gpu_fence_verification"), json);
+    }
+
+    std::pair<QString, QString> finish_report()
+    {
+        const auto json = QString::fromUtf8(QJsonDocument(m_pending_gpu_report->root).toJson(QJsonDocument::Indented));
+        const auto text = m_pending_gpu_report->summary.join('\n');
+        qInfo().noquote() << json;
+        m_pending_gpu_report.reset();
+        return { text, json };
     }
 
     std::optional<std::pair<QString, QString>> poll_gpu_report()
     {
         Q_ASSERT(m_pending_gpu_report);
+        if (m_pending_gpu_report->fence_diagnostic) {
+            if (!poll_fence_diagnostic(*m_pending_gpu_report->fence_diagnostic))
+                return std::nullopt;
+            append_fence_report(*m_pending_gpu_report, *m_pending_gpu_report->fence_diagnostic);
+            m_pending_gpu_report->fence_diagnostic.reset();
+        }
+        if (!m_gpu_timer->is_supported())
+            return finish_report();
+
         bool all_finished = true;
         for (size_t i = 0; i < m_pending_gpu_report->tickets.size(); ++i) {
             if (m_pending_gpu_report->query_finished[i])
@@ -343,11 +592,7 @@ private:
             gpu_timer_json.insert(QStringLiteral("status"), QStringLiteral("disjoint"));
         }
         m_pending_gpu_report->root.insert(QStringLiteral("gpu_timer_query"), gpu_timer_json);
-        const auto json = QString::fromUtf8(QJsonDocument(m_pending_gpu_report->root).toJson(QJsonDocument::Indented));
-        const auto text = m_pending_gpu_report->summary.join('\n');
-        qInfo().noquote() << json;
-        m_pending_gpu_report.reset();
-        return std::pair(text, json);
+        return finish_report();
     }
 
     std::pair<QString, QString> run()
@@ -386,10 +631,11 @@ private:
         gl_engine::Texture cpu_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
         cpu_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
         cpu_destination.allocate_array(resolution, resolution, unsigned(m_batch_size));
-        gl_engine::Texture gpu_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
-        gpu_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
-        gpu_destination.allocate_array(resolution, resolution, unsigned(m_batch_size));
-        gl_engine::TextureCompressor gpu_compressor(resolution, resolution, unsigned(m_batch_size));
+        auto gpu_destination = std::make_unique<gl_engine::Texture>(
+            gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
+        gpu_destination->setParams(filter, gl_engine::Texture::Filter::Linear);
+        gpu_destination->allocate_array(resolution, resolution, unsigned(m_batch_size));
+        auto gpu_compressor = std::make_unique<gl_engine::TextureCompressor>(resolution, resolution, unsigned(m_batch_size));
         m_gpu_timer = std::make_unique<gl_engine::TextureCompressor::GpuTimer>();
 
         auto upload_cpu = [&](const std::vector<nucleus::utils::MipmappedColourTexture>& compressed) {
@@ -443,10 +689,10 @@ private:
         }
 
         for (int iteration = 0; iteration < warmup_iterations; ++iteration)
-            static_cast<void>(gpu_compressor.compress(sources, gpu_destination, layers, gpu_settings));
+            static_cast<void>(gpu_compressor->compress(sources, *gpu_destination, layers, gpu_settings));
         for (int iteration = 0; iteration < m_iterations; ++iteration) {
-            const auto gpu = gpu_compressor.compress(sources,
-                gpu_destination,
+            const auto gpu = gpu_compressor->compress(sources,
+                *gpu_destination,
                 layers,
                 gpu_settings);
             gpu_total_times.push_back(gpu.timings.total_ms);
@@ -459,7 +705,7 @@ private:
         stage_settings.timing_mode = gl_engine::TextureCompressor::TimingMode::IndividualStages;
         stage_settings.gpu_timer = m_gpu_timer.get();
         for (int iteration = 0; iteration < m_iterations; ++iteration) {
-            const auto gpu = gpu_compressor.compress(sources, gpu_destination, layers, stage_settings);
+            const auto gpu = gpu_compressor->compress(sources, *gpu_destination, layers, stage_settings);
             gpu_upload_times.append(gpu.timings.scratch_upload);
             gpu_mipmap_times.append(gpu.timings.mipmap_generation);
             gpu_compression_pass_times.append(gpu.timings.compression_pass);
@@ -483,7 +729,7 @@ private:
         const auto gpu_compressed_upload = statistics(gpu_compressed_upload_times.total);
         const auto gpu_total = statistics(gpu_total_times);
         const auto cpu_psnr = linear_psnr(reconstruct(cpu_destination, resolution), source);
-        const auto gpu_psnr = linear_psnr(reconstruct(gpu_destination, resolution), source);
+        const auto gpu_psnr = linear_psnr(reconstruct(*gpu_destination, resolution), source);
         const auto algorithm_name = algorithm == nucleus::utils::ColourTexture::Format::DXT1 ? QStringLiteral("DXT1 / BC1") : QStringLiteral("ETC1 in ETC2");
 
         QJsonObject root {
@@ -516,7 +762,8 @@ private:
             { QStringLiteral("gpu_psnr_db"), gpu_psnr },
             { QStringLiteral("cpu_tiles_per_second"), 1000.0 * m_batch_size / cpu_total.median },
             { QStringLiteral("gpu_tiles_per_second"), 1000.0 * m_batch_size / gpu_total.median },
-            { QStringLiteral("phase_order"), QStringLiteral("CPU warmup, CPU measurement, GPU warmup, GPU end-to-end measurement, GPU stage profiling") },
+            { QStringLiteral("phase_order"),
+                QStringLiteral("CPU warmup, CPU measurement, GPU warmup, GPU end-to-end measurement, GPU stage profiling, asynchronous fence verification") },
             { QStringLiteral("gpu_stage_timing_method"), QStringLiteral("separate profiling pass; each stage glFinish-synchronised") },
             { QStringLiteral("gpu_stage_wall_profile"),
                 QJsonObject {
@@ -586,27 +833,52 @@ private:
             QStringLiteral("CPU PSNR        %1 dB").arg(cpu_psnr, 0, 'f', 2),
             QStringLiteral("GPU PSNR        %1 dB").arg(gpu_psnr, 0, 'f', 2),
         };
-        if (m_gpu_timer->is_supported()) {
-            Q_ASSERT(gpu_timing_tickets.size() == size_t(m_iterations));
-            m_pending_gpu_report = PendingGpuReport {
-                .root = std::move(root),
-                .summary = std::move(summary),
-                .tickets = std::move(gpu_timing_tickets),
-                .query_results = std::vector<std::optional<gl_engine::TextureCompressor::GpuTimings>>(size_t(m_iterations)),
-                .query_finished = std::vector<bool>(size_t(m_iterations), false),
-            };
-            return {};
+        if (!m_gpu_timer->is_supported()) {
+            root.insert(QStringLiteral("gpu_timer_query"),
+                QJsonObject {
+                    { QStringLiteral("supported"), false },
+                    { QStringLiteral("status"), QStringLiteral("unsupported") },
+                });
         }
 
-        root.insert(QStringLiteral("gpu_timer_query"),
-            QJsonObject {
-                { QStringLiteral("supported"), false },
-                { QStringLiteral("status"), QStringLiteral("unsupported") },
-            });
-        const auto json = QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented));
-        const auto text = summary.join('\n');
-        qInfo().noquote() << json;
-        return { text, json };
+        m_pending_gpu_report = PendingGpuReport {
+            .root = std::move(root),
+            .summary = std::move(summary),
+            .tickets = std::move(gpu_timing_tickets),
+            .query_results = std::vector<std::optional<gl_engine::TextureCompressor::GpuTimings>>(size_t(m_iterations)),
+            .query_finished = std::vector<bool>(size_t(m_iterations), false),
+        };
+        if (m_gpu_timer->is_supported())
+            Q_ASSERT(m_pending_gpu_report->tickets.size() == size_t(m_iterations));
+
+        PendingFenceDiagnostic fence_diagnostic;
+        fence_diagnostic.compressor = std::move(gpu_compressor);
+        fence_diagnostic.destination = std::move(gpu_destination);
+        fence_diagnostic.probe_framebuffer = std::make_unique<gl_engine::Framebuffer>(gl_engine::Framebuffer::DepthFormat::None,
+            std::vector<gl_engine::Framebuffer::ColourFormat> { gl_engine::Framebuffer::ColourFormat::RGBA8 },
+            glm::uvec2(unsigned(m_batch_size), 1u));
+        fence_diagnostic.probe_shader = std::make_unique<gl_engine::ShaderProgram>(R"(
+            void main() {
+                highp vec2 vertices[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+                gl_Position = vec4(vertices[gl_VertexID], 0.0, 1.0);
+            })",
+            R"(
+            uniform lowp sampler2DArray texture_sampler;
+            out lowp vec4 out_color;
+            void main() {
+                highp int layer = int(gl_FragCoord.x);
+                out_color = textureLod(texture_sampler, vec3(0.5, 0.5, float(layer)), 0.0);
+            })",
+            gl_engine::ShaderCodeSource::PLAINTEXT);
+        fence_diagnostic.probe_geometry = gl_engine::helpers::create_screen_quad_geometry();
+        fence_diagnostic.sources = std::move(sources);
+        fence_diagnostic.layers = std::move(layers);
+        fence_diagnostic.settings = gpu_settings;
+        fence_diagnostic.settings.timing_mode = gl_engine::TextureCompressor::TimingMode::SubmissionOnly;
+        fence_diagnostic.iteration_count = m_iterations;
+        m_pending_gpu_report->fence_diagnostic.emplace(std::move(fence_diagnostic));
+        begin_fence_sample(*m_pending_gpu_report->fence_diagnostic);
+        return {};
     }
 
     QPointer<BenchmarkItem> m_item;

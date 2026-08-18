@@ -93,7 +93,7 @@ private:
 class TextureCompressor {
 public:
     enum class Backend { FragmentShader, TransformFeedback };
-    enum class TimingMode { EndToEnd, IndividualStages };
+    enum class TimingMode { EndToEnd, IndividualStages, SubmissionOnly };
 
     struct GpuTimings {
         double scratch_upload_ms = 0.0;
@@ -150,8 +150,8 @@ public:
     };
 
     struct Timings {
-        // total_ms always includes one completion wait. Individual stage values only include
-        // completion waits when Settings::timing_mode is IndividualStages.
+        // EndToEnd includes one final completion wait. IndividualStages includes a completion
+        // wait per stage. SubmissionOnly does not wait for GPU completion.
         StageTiming scratch_upload;
         StageTiming mipmap_generation;
         StageTiming compression_pass;
