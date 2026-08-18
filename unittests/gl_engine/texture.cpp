@@ -702,12 +702,15 @@ TEST_CASE("gl texture GPU compression quality")
     destination.setParams(gl_engine::Texture::Filter::MipMapLinear, gl_engine::Texture::Filter::Nearest);
     destination.allocate_array(resolution, resolution, unsigned(sources.size()));
 
+    auto* f = QOpenGLContext::currentContext()->extraFunctions();
+    while (f->glGetError() != GL_NO_ERROR) { }
     gl_engine::TextureCompressor compressor(resolution, resolution, unsigned(sources.size()));
     const std::array<unsigned, 2> destination_layers { 0, 1 };
     const auto result = compressor.compress(sources,
         destination,
         destination_layers,
         { .algorithm = gl_engine::Texture::compression_algorithm(), .effort = 4, .generate_mipmaps = true });
+    CHECK(f->glGetError() == GL_NO_ERROR);
     size_t expected_size = 0;
     for (unsigned level = 0; level < gl_engine::TextureCompressor::mip_level_count(resolution, resolution); ++level) {
         expected_size += gl_engine::TextureCompressor::compressed_level_size(
@@ -716,6 +719,23 @@ TEST_CASE("gl texture GPU compression quality")
     CHECK(result.encoded_bytes == expected_size * sources.size());
     CHECK(result.mip_levels == 7);
     CHECK(result.timings.total_ms > 0.0);
+
+    const auto profiled_result = compressor.compress(sources,
+        destination,
+        destination_layers,
+        { .algorithm = gl_engine::Texture::compression_algorithm(),
+            .effort = 4,
+            .generate_mipmaps = true,
+            .timing_mode = gl_engine::TextureCompressor::TimingMode::IndividualStages });
+    CHECK(profiled_result.timings.scratch_upload.total_ms() > 0.0);
+    CHECK(profiled_result.timings.mipmap_generation.total_ms() > 0.0);
+    CHECK(profiled_result.timings.compression_pass.total_ms() > 0.0);
+    CHECK(profiled_result.timings.packing_pass.total_ms() > 0.0);
+    CHECK(profiled_result.timings.encoding.total_ms() > 0.0);
+    CHECK(profiled_result.timings.output_transfer.total_ms() > 0.0);
+    CHECK(profiled_result.timings.compressed_upload.total_ms() > 0.0);
+    CHECK(profiled_result.timings.total_ms > 0.0);
+    CHECK(f->glGetError() == GL_NO_ERROR);
 
     Framebuffer framebuffer(Framebuffer::DepthFormat::None, { Framebuffer::ColourFormat::RGBA8 }, { resolution, resolution });
     framebuffer.bind();

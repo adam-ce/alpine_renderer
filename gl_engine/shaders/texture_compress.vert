@@ -9,7 +9,7 @@ uniform highp int mip_levels;
 uniform highp int level_offsets[max_mip_levels];
 uniform highp int level_blocks_x[max_mip_levels];
 uniform highp int level_blocks_y[max_mip_levels];
-layout(location = 0) out highp uvec4 encoded_pixel;
+layout(location = 0) out highp uvec2 encoded_block;
 #else
 uniform highp int blocks_x;
 uniform highp int blocks_y;
@@ -197,10 +197,9 @@ highp uvec2 compress_block(highp ivec2 block,
 void main()
 {
 #ifdef ALP_FRAGMENT_COMPRESSION
-    highp int output_pixel = int(gl_FragCoord.y) * atlas_width + int(gl_FragCoord.x);
-    if (output_pixel >= total_blocks * 2)
+    highp int output_index = int(gl_FragCoord.y) * atlas_width + int(gl_FragCoord.x);
+    if (output_index >= total_blocks)
         discard;
-    highp int output_index = output_pixel / 2;
 
     highp int level = 0;
     for (int candidate = 1; candidate < max_mip_levels; ++candidate) {
@@ -216,9 +215,7 @@ void main()
     highp int layer = level_index / blocks_per_layer;
     highp int block_index = level_index - layer * blocks_per_layer;
     highp ivec2 block = ivec2(block_index % blocks_x_at_level, block_index / blocks_x_at_level);
-    highp uvec2 encoded = compress_block(block, layer, level, max(1, texture_width >> level), max(1, texture_height >> level));
-    highp uint word = output_pixel % 2 == 0 ? encoded.x : encoded.y;
-    encoded_pixel = uvec4(word & 0xffu, (word >> 8u) & 0xffu, (word >> 16u) & 0xffu, word >> 24u);
+    encoded_block = compress_block(block, layer, level, max(1, texture_width >> level), max(1, texture_height >> level));
 #else
     highp int blocks_per_layer = blocks_x * blocks_y;
     highp int layer = gl_VertexID / blocks_per_layer;

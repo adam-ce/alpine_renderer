@@ -21,6 +21,7 @@
 #include <QImage>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <qopengl.h>
 #include <span>
 #include <vector>
@@ -92,20 +93,72 @@ private:
 class TextureCompressor {
 public:
     enum class Backend { FragmentShader, TransformFeedback };
+    enum class TimingMode { EndToEnd, IndividualStages };
+
+    struct GpuTimings {
+        double scratch_upload_ms = 0.0;
+        double mipmap_generation_ms = 0.0;
+        double compression_pass_ms = 0.0;
+        double packing_pass_ms = 0.0;
+        double output_transfer_ms = 0.0;
+        double compressed_upload_ms = 0.0;
+
+        [[nodiscard]] double total_ms() const;
+    };
+
+    class GpuTimer {
+    public:
+        enum class PollStatus { Pending, Ready, Disjoint };
+
+        GpuTimer();
+        ~GpuTimer();
+        GpuTimer(const GpuTimer&) = delete;
+        GpuTimer(GpuTimer&&) = delete;
+        GpuTimer& operator=(const GpuTimer&) = delete;
+        GpuTimer& operator=(GpuTimer&&) = delete;
+
+        [[nodiscard]] bool is_supported() const;
+        [[nodiscard]] PollStatus poll(uint64_t ticket, GpuTimings& timings);
+
+    private:
+        friend class TextureCompressor;
+        enum class Stage { ScratchUpload, MipmapGeneration, CompressionPass, PackingPass, OutputTransfer, CompressedUpload };
+
+        [[nodiscard]] uint64_t begin_sample();
+        void begin_stage(Stage stage);
+        void end_stage();
+        void end_sample();
+
+        struct Impl;
+        std::unique_ptr<Impl> m;
+    };
 
     struct Settings {
         nucleus::utils::ColourTexture::Format algorithm = nucleus::utils::ColourTexture::Format::DXT1;
         unsigned effort = 0;
         bool generate_mipmaps = true;
         Backend backend = Backend::FragmentShader;
+        TimingMode timing_mode = TimingMode::EndToEnd;
+        GpuTimer* gpu_timer = nullptr;
+    };
+
+    struct StageTiming {
+        double submission_ms = 0.0;
+        double completion_wait_ms = 0.0;
+
+        [[nodiscard]] double total_ms() const { return submission_ms + completion_wait_ms; }
     };
 
     struct Timings {
-        double scratch_upload_ms = 0.0;
-        double mipmap_generation_ms = 0.0;
-        double encoding_ms = 0.0;
-        double output_transfer_ms = 0.0;
-        double compressed_upload_ms = 0.0;
+        // total_ms always includes one completion wait. Individual stage values only include
+        // completion waits when Settings::timing_mode is IndividualStages.
+        StageTiming scratch_upload;
+        StageTiming mipmap_generation;
+        StageTiming compression_pass;
+        StageTiming packing_pass;
+        StageTiming encoding;
+        StageTiming output_transfer;
+        StageTiming compressed_upload;
         double total_ms = 0.0;
     };
 
@@ -113,6 +166,7 @@ public:
         Timings timings;
         size_t encoded_bytes = 0;
         unsigned mip_levels = 0;
+        uint64_t gpu_timing_ticket = 0;
     };
 
     TextureCompressor(unsigned width, unsigned height, unsigned max_batch_size);

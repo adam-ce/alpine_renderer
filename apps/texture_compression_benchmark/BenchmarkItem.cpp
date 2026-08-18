@@ -9,6 +9,7 @@
 #include <QClipboard>
 #include <QGuiApplication>
 #include <QImage>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QOpenGLContext>
@@ -23,6 +24,7 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -62,6 +64,54 @@ QJsonObject to_json(const Statistics& value)
         { QStringLiteral("min_ms"), value.minimum },
         { QStringLiteral("max_ms"), value.maximum } };
 }
+
+QJsonArray samples_to_json(const std::vector<double>& values)
+{
+    QJsonArray result;
+    for (const auto value : values)
+        result.append(value);
+    return result;
+}
+
+struct WallTimingSamples {
+    std::vector<double> total;
+    std::vector<double> submission;
+    std::vector<double> completion_wait;
+
+    void append(const gl_engine::TextureCompressor::StageTiming& timing)
+    {
+        total.push_back(timing.total_ms());
+        submission.push_back(timing.submission_ms);
+        completion_wait.push_back(timing.completion_wait_ms);
+    }
+
+    [[nodiscard]] QJsonObject statistics_json() const
+    {
+        return {
+            { QStringLiteral("total"), to_json(statistics(total)) },
+            { QStringLiteral("submission"), to_json(statistics(submission)) },
+            { QStringLiteral("completion_wait"), to_json(statistics(completion_wait)) },
+        };
+    }
+
+    [[nodiscard]] QJsonObject raw_json() const
+    {
+        return {
+            { QStringLiteral("total"), samples_to_json(total) },
+            { QStringLiteral("submission"), samples_to_json(submission) },
+            { QStringLiteral("completion_wait"), samples_to_json(completion_wait) },
+        };
+    }
+};
+
+struct PendingGpuReport {
+    QJsonObject root;
+    QStringList summary;
+    std::vector<uint64_t> tickets;
+    std::vector<std::optional<gl_engine::TextureCompressor::GpuTimings>> query_results;
+    std::vector<bool> query_finished;
+    int disjoint_samples = 0;
+};
 
 double elapsed_ms(Clock::time_point start)
 {
@@ -171,17 +221,29 @@ public:
 
     void render() override
     {
-        if (!m_pending)
+        if (!m_pending && !m_pending_gpu_report)
             return;
-        m_pending = false;
         m_window->beginExternalCommands();
-        const auto [text, json] = run();
+        std::optional<std::pair<QString, QString>> completed;
+        if (m_pending) {
+            m_pending = false;
+            const auto immediate = run();
+            if (!m_pending_gpu_report)
+                completed = immediate;
+        } else {
+            completed = poll_gpu_report();
+        }
         m_window->endExternalCommands();
-        QPointer<BenchmarkItem> item = m_item;
-        QMetaObject::invokeMethod(m_item, [item, text, json]() {
-            if (item)
-                item->publishResults(text, json);
-        });
+        if (completed) {
+            QPointer<BenchmarkItem> item = m_item;
+            const auto [text, json] = std::move(*completed);
+            QMetaObject::invokeMethod(m_item, [item, text, json]() {
+                if (item)
+                    item->publishResults(text, json);
+            });
+        } else {
+            request_another_frame();
+        }
     }
 
     QOpenGLFramebufferObject* createFramebufferObject(const QSize&) override
@@ -192,6 +254,102 @@ public:
     }
 
 private:
+    void request_another_frame()
+    {
+        QPointer<BenchmarkItem> item = m_item;
+        QMetaObject::invokeMethod(m_item, [item]() {
+            if (item)
+                item->update();
+        });
+    }
+
+    std::optional<std::pair<QString, QString>> poll_gpu_report()
+    {
+        Q_ASSERT(m_pending_gpu_report);
+        bool all_finished = true;
+        for (size_t i = 0; i < m_pending_gpu_report->tickets.size(); ++i) {
+            if (m_pending_gpu_report->query_finished[i])
+                continue;
+            gl_engine::TextureCompressor::GpuTimings timings;
+            const auto status = m_gpu_timer->poll(m_pending_gpu_report->tickets[i], timings);
+            if (status == gl_engine::TextureCompressor::GpuTimer::PollStatus::Pending) {
+                all_finished = false;
+                continue;
+            }
+            m_pending_gpu_report->query_finished[i] = true;
+            if (status == gl_engine::TextureCompressor::GpuTimer::PollStatus::Ready)
+                m_pending_gpu_report->query_results[i] = timings;
+            else
+                ++m_pending_gpu_report->disjoint_samples;
+        }
+        if (!all_finished)
+            return std::nullopt;
+
+        std::vector<double> scratch_upload;
+        std::vector<double> mipmap_generation;
+        std::vector<double> compression_pass;
+        std::vector<double> packing_pass;
+        std::vector<double> output_transfer;
+        std::vector<double> compressed_upload;
+        std::vector<double> total;
+        for (const auto& result : m_pending_gpu_report->query_results) {
+            if (!result)
+                continue;
+            scratch_upload.push_back(result->scratch_upload_ms);
+            mipmap_generation.push_back(result->mipmap_generation_ms);
+            compression_pass.push_back(result->compression_pass_ms);
+            packing_pass.push_back(result->packing_pass_ms);
+            output_transfer.push_back(result->output_transfer_ms);
+            compressed_upload.push_back(result->compressed_upload_ms);
+            total.push_back(result->total_ms());
+        }
+
+        QJsonObject gpu_timer_json {
+            { QStringLiteral("supported"), true },
+            { QStringLiteral("timing_method"), QStringLiteral("EXT_disjoint_timer_query; asynchronous GPU elapsed time") },
+            { QStringLiteral("requested_samples"), int(m_pending_gpu_report->tickets.size()) },
+            { QStringLiteral("valid_samples"), int(total.size()) },
+            { QStringLiteral("disjoint_samples"), m_pending_gpu_report->disjoint_samples },
+        };
+        if (!total.empty()) {
+            gpu_timer_json.insert(QStringLiteral("status"),
+                m_pending_gpu_report->disjoint_samples ? QStringLiteral("partial") : QStringLiteral("valid"));
+            gpu_timer_json.insert(QStringLiteral("scratch_upload"), to_json(statistics(scratch_upload)));
+            gpu_timer_json.insert(QStringLiteral("mipmap_generation"), to_json(statistics(mipmap_generation)));
+            gpu_timer_json.insert(QStringLiteral("compression_pass"), to_json(statistics(compression_pass)));
+            gpu_timer_json.insert(QStringLiteral("packing_pass"), to_json(statistics(packing_pass)));
+            gpu_timer_json.insert(QStringLiteral("output_transfer"), to_json(statistics(output_transfer)));
+            gpu_timer_json.insert(QStringLiteral("compressed_upload"), to_json(statistics(compressed_upload)));
+            gpu_timer_json.insert(QStringLiteral("total_profiled_stages"), to_json(statistics(total)));
+            gpu_timer_json.insert(QStringLiteral("raw_samples_ms"),
+                QJsonObject {
+                    { QStringLiteral("scratch_upload"), samples_to_json(scratch_upload) },
+                    { QStringLiteral("mipmap_generation"), samples_to_json(mipmap_generation) },
+                    { QStringLiteral("compression_pass"), samples_to_json(compression_pass) },
+                    { QStringLiteral("packing_pass"), samples_to_json(packing_pass) },
+                    { QStringLiteral("output_transfer"), samples_to_json(output_transfer) },
+                    { QStringLiteral("compressed_upload"), samples_to_json(compressed_upload) },
+                    { QStringLiteral("total_profiled_stages"), samples_to_json(total) },
+                });
+            m_pending_gpu_report->summary.push_back(QString());
+            m_pending_gpu_report->summary.push_back(QStringLiteral("Actual GPU time (timer query)"));
+            m_pending_gpu_report->summary.push_back(
+                QStringLiteral("Compression pass            median %1 ms").arg(statistics(compression_pass).median, 8, 'f', 3));
+            m_pending_gpu_report->summary.push_back(
+                QStringLiteral("Packing pass                median %1 ms").arg(statistics(packing_pass).median, 8, 'f', 3));
+            m_pending_gpu_report->summary.push_back(
+                QStringLiteral("Profiled GPU stages total   median %1 ms").arg(statistics(total).median, 8, 'f', 3));
+        } else {
+            gpu_timer_json.insert(QStringLiteral("status"), QStringLiteral("disjoint"));
+        }
+        m_pending_gpu_report->root.insert(QStringLiteral("gpu_timer_query"), gpu_timer_json);
+        const auto json = QString::fromUtf8(QJsonDocument(m_pending_gpu_report->root).toJson(QJsonDocument::Indented));
+        const auto text = m_pending_gpu_report->summary.join('\n');
+        qInfo().noquote() << json;
+        m_pending_gpu_report.reset();
+        return std::pair(text, json);
+    }
+
     std::pair<QString, QString> run()
     {
         constexpr unsigned resolution = 512;
@@ -232,59 +390,97 @@ private:
         gpu_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
         gpu_destination.allocate_array(resolution, resolution, unsigned(m_batch_size));
         gl_engine::TextureCompressor gpu_compressor(resolution, resolution, unsigned(m_batch_size));
+        m_gpu_timer = std::make_unique<gl_engine::TextureCompressor::GpuTimer>();
 
         auto upload_cpu = [&](const std::vector<nucleus::utils::MipmappedColourTexture>& compressed) {
+            const auto start = Clock::now();
             for (size_t layer = 0; layer < compressed.size(); ++layer)
                 cpu_destination.upload(compressed[layer], unsigned(layer));
             QOpenGLContext::currentContext()->extraFunctions()->glFinish();
+            return elapsed_ms(start);
         };
 
-        auto warmup_cpu = cpu_compress(sources, algorithm, m_mipmaps);
-        upload_cpu(warmup_cpu);
-        static_cast<void>(gpu_compressor.compress(sources,
-            gpu_destination,
-            layers,
-            { .algorithm = algorithm, .effort = unsigned(m_effort), .generate_mipmaps = m_mipmaps, .backend = backend }));
+        constexpr int warmup_iterations = 3;
+        const gl_engine::TextureCompressor::Settings gpu_settings {
+            .algorithm = algorithm,
+            .effort = unsigned(m_effort),
+            .generate_mipmaps = m_mipmaps,
+            .backend = backend,
+            .timing_mode = gl_engine::TextureCompressor::TimingMode::EndToEnd,
+        };
 
         std::vector<double> cpu_compression_times;
+        std::vector<double> cpu_upload_times;
         std::vector<double> cpu_total_times;
-        std::vector<double> gpu_upload_times;
-        std::vector<double> gpu_mipmap_times;
-        std::vector<double> gpu_encoding_times;
-        std::vector<double> gpu_output_transfer_times;
-        std::vector<double> gpu_compressed_upload_times;
+        WallTimingSamples gpu_upload_times;
+        WallTimingSamples gpu_mipmap_times;
+        WallTimingSamples gpu_compression_pass_times;
+        WallTimingSamples gpu_packing_pass_times;
+        WallTimingSamples gpu_encoding_times;
+        WallTimingSamples gpu_output_transfer_times;
+        WallTimingSamples gpu_compressed_upload_times;
         std::vector<double> gpu_total_times;
+        std::vector<uint64_t> gpu_timing_tickets;
         cpu_compression_times.reserve(size_t(m_iterations));
+        cpu_upload_times.reserve(size_t(m_iterations));
         cpu_total_times.reserve(size_t(m_iterations));
         gpu_total_times.reserve(size_t(m_iterations));
 
+        // Keep CPU and GPU phases separate: mobile CPU frequency and thermal state are shared
+        // with the GPU, so interleaving them makes the CPU result backend-dependent.
+        for (int iteration = 0; iteration < warmup_iterations; ++iteration) {
+            auto compressed = cpu_compress(sources, algorithm, m_mipmaps);
+            static_cast<void>(upload_cpu(compressed));
+        }
         for (int iteration = 0; iteration < m_iterations; ++iteration) {
             const auto cpu_start = Clock::now();
             auto compressed = cpu_compress(sources, algorithm, m_mipmaps);
             const auto cpu_compression_time = elapsed_ms(cpu_start);
-            upload_cpu(compressed);
+            const auto cpu_upload_time = upload_cpu(compressed);
             cpu_compression_times.push_back(cpu_compression_time);
+            cpu_upload_times.push_back(cpu_upload_time);
             cpu_total_times.push_back(elapsed_ms(cpu_start));
+        }
 
+        for (int iteration = 0; iteration < warmup_iterations; ++iteration)
+            static_cast<void>(gpu_compressor.compress(sources, gpu_destination, layers, gpu_settings));
+        for (int iteration = 0; iteration < m_iterations; ++iteration) {
             const auto gpu = gpu_compressor.compress(sources,
                 gpu_destination,
                 layers,
-                { .algorithm = algorithm, .effort = unsigned(m_effort), .generate_mipmaps = m_mipmaps, .backend = backend });
-            gpu_upload_times.push_back(gpu.timings.scratch_upload_ms);
-            gpu_mipmap_times.push_back(gpu.timings.mipmap_generation_ms);
-            gpu_encoding_times.push_back(gpu.timings.encoding_ms);
-            gpu_output_transfer_times.push_back(gpu.timings.output_transfer_ms);
-            gpu_compressed_upload_times.push_back(gpu.timings.compressed_upload_ms);
+                gpu_settings);
             gpu_total_times.push_back(gpu.timings.total_ms);
         }
 
+        // Stage timings are collected in a separate profiling phase. Each stage is completed
+        // independently, so these values diagnose where time is spent but are not summed to
+        // produce the end-to-end result above.
+        auto stage_settings = gpu_settings;
+        stage_settings.timing_mode = gl_engine::TextureCompressor::TimingMode::IndividualStages;
+        stage_settings.gpu_timer = m_gpu_timer.get();
+        for (int iteration = 0; iteration < m_iterations; ++iteration) {
+            const auto gpu = gpu_compressor.compress(sources, gpu_destination, layers, stage_settings);
+            gpu_upload_times.append(gpu.timings.scratch_upload);
+            gpu_mipmap_times.append(gpu.timings.mipmap_generation);
+            gpu_compression_pass_times.append(gpu.timings.compression_pass);
+            gpu_packing_pass_times.append(gpu.timings.packing_pass);
+            gpu_encoding_times.append(gpu.timings.encoding);
+            gpu_output_transfer_times.append(gpu.timings.output_transfer);
+            gpu_compressed_upload_times.append(gpu.timings.compressed_upload);
+            if (gpu.gpu_timing_ticket)
+                gpu_timing_tickets.push_back(gpu.gpu_timing_ticket);
+        }
+
         const auto cpu_compression = statistics(cpu_compression_times);
+        const auto cpu_upload = statistics(cpu_upload_times);
         const auto cpu_total = statistics(cpu_total_times);
-        const auto gpu_upload = statistics(gpu_upload_times);
-        const auto gpu_mipmap = statistics(gpu_mipmap_times);
-        const auto gpu_encoding = statistics(gpu_encoding_times);
-        const auto gpu_output_transfer = statistics(gpu_output_transfer_times);
-        const auto gpu_compressed_upload = statistics(gpu_compressed_upload_times);
+        const auto gpu_upload = statistics(gpu_upload_times.total);
+        const auto gpu_mipmap = statistics(gpu_mipmap_times.total);
+        const auto gpu_compression_pass = statistics(gpu_compression_pass_times.total);
+        const auto gpu_packing_pass = statistics(gpu_packing_pass_times.total);
+        const auto gpu_encoding = statistics(gpu_encoding_times.total);
+        const auto gpu_output_transfer = statistics(gpu_output_transfer_times.total);
+        const auto gpu_compressed_upload = statistics(gpu_compressed_upload_times.total);
         const auto gpu_total = statistics(gpu_total_times);
         const auto cpu_psnr = linear_psnr(reconstruct(cpu_destination, resolution), source);
         const auto gpu_psnr = linear_psnr(reconstruct(gpu_destination, resolution), source);
@@ -297,16 +493,21 @@ private:
             { QStringLiteral("supported"), true },
             { QStringLiteral("algorithm"), algorithm_name },
             { QStringLiteral("gpu_backend"), backend_name },
-            { QStringLiteral("timing_method"), QStringLiteral("glFinish-synchronised wall time") },
+            { QStringLiteral("timing_method"), QStringLiteral("wall time; one final glFinish per end-to-end sample") },
             { QStringLiteral("resolution"), int(resolution) },
             { QStringLiteral("batch_size"), m_batch_size },
             { QStringLiteral("iterations"), m_iterations },
+            { QStringLiteral("warmup_iterations"), warmup_iterations },
+            { QStringLiteral("gpu_stage_profile_iterations"), m_iterations },
             { QStringLiteral("effort"), m_effort },
             { QStringLiteral("mipmaps"), m_mipmaps },
             { QStringLiteral("cpu_compression"), to_json(cpu_compression) },
+            { QStringLiteral("cpu_compressed_upload"), to_json(cpu_upload) },
             { QStringLiteral("cpu_end_to_end"), to_json(cpu_total) },
             { QStringLiteral("gpu_scratch_upload"), to_json(gpu_upload) },
             { QStringLiteral("gpu_mipmap_generation"), to_json(gpu_mipmap) },
+            { QStringLiteral("gpu_compression_pass"), to_json(gpu_compression_pass) },
+            { QStringLiteral("gpu_packing_pass"), to_json(gpu_packing_pass) },
             { QStringLiteral("gpu_encoding"), to_json(gpu_encoding) },
             { QStringLiteral("gpu_output_transfer"), to_json(gpu_output_transfer) },
             { QStringLiteral("gpu_compressed_upload"), to_json(gpu_compressed_upload) },
@@ -315,8 +516,43 @@ private:
             { QStringLiteral("gpu_psnr_db"), gpu_psnr },
             { QStringLiteral("cpu_tiles_per_second"), 1000.0 * m_batch_size / cpu_total.median },
             { QStringLiteral("gpu_tiles_per_second"), 1000.0 * m_batch_size / gpu_total.median },
+            { QStringLiteral("phase_order"), QStringLiteral("CPU warmup, CPU measurement, GPU warmup, GPU end-to-end measurement, GPU stage profiling") },
+            { QStringLiteral("gpu_stage_timing_method"), QStringLiteral("separate profiling pass; each stage glFinish-synchronised") },
+            { QStringLiteral("gpu_stage_wall_profile"),
+                QJsonObject {
+                    { QStringLiteral("scratch_upload"), gpu_upload_times.statistics_json() },
+                    { QStringLiteral("mipmap_generation"), gpu_mipmap_times.statistics_json() },
+                    { QStringLiteral("compression_pass"), gpu_compression_pass_times.statistics_json() },
+                    { QStringLiteral("packing_pass"), gpu_packing_pass_times.statistics_json() },
+                    { QStringLiteral("encoding_total"), gpu_encoding_times.statistics_json() },
+                    { QStringLiteral("output_transfer"), gpu_output_transfer_times.statistics_json() },
+                    { QStringLiteral("compressed_upload"), gpu_compressed_upload_times.statistics_json() },
+                    { QStringLiteral("raw_samples_ms"),
+                        QJsonObject {
+                            { QStringLiteral("scratch_upload"), gpu_upload_times.raw_json() },
+                            { QStringLiteral("mipmap_generation"), gpu_mipmap_times.raw_json() },
+                            { QStringLiteral("compression_pass"), gpu_compression_pass_times.raw_json() },
+                            { QStringLiteral("packing_pass"), gpu_packing_pass_times.raw_json() },
+                            { QStringLiteral("encoding_total"), gpu_encoding_times.raw_json() },
+                            { QStringLiteral("output_transfer"), gpu_output_transfer_times.raw_json() },
+                            { QStringLiteral("compressed_upload"), gpu_compressed_upload_times.raw_json() },
+                        } },
+                } },
+            { QStringLiteral("raw_samples_ms"),
+                QJsonObject {
+                    { QStringLiteral("cpu_compression"), samples_to_json(cpu_compression_times) },
+                    { QStringLiteral("cpu_compressed_upload"), samples_to_json(cpu_upload_times) },
+                    { QStringLiteral("cpu_end_to_end"), samples_to_json(cpu_total_times) },
+                    { QStringLiteral("gpu_end_to_end"), samples_to_json(gpu_total_times) },
+                    { QStringLiteral("gpu_scratch_upload_stage_profile"), samples_to_json(gpu_upload_times.total) },
+                    { QStringLiteral("gpu_mipmap_generation_stage_profile"), samples_to_json(gpu_mipmap_times.total) },
+                    { QStringLiteral("gpu_compression_pass_stage_profile"), samples_to_json(gpu_compression_pass_times.total) },
+                    { QStringLiteral("gpu_packing_pass_stage_profile"), samples_to_json(gpu_packing_pass_times.total) },
+                    { QStringLiteral("gpu_encoding_stage_profile"), samples_to_json(gpu_encoding_times.total) },
+                    { QStringLiteral("gpu_output_transfer_stage_profile"), samples_to_json(gpu_output_transfer_times.total) },
+                    { QStringLiteral("gpu_compressed_upload_stage_profile"), samples_to_json(gpu_compressed_upload_times.total) },
+                } },
         };
-        const auto json = QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented));
         const auto line = [](QString label, Statistics value) {
             return QStringLiteral("%1  median %2 ms   p95 %3 ms").arg(label, -26).arg(value.median, 8, 'f', 3).arg(value.p95, 8, 'f', 3);
         };
@@ -330,12 +566,16 @@ private:
                 .arg(m_mipmaps ? QStringLiteral("on") : QStringLiteral("off")),
             backend_name,
             gl_string(GL_RENDERER),
-            QStringLiteral("Timing: completion-synchronised wall time"),
+            QStringLiteral("Timing: one final glFinish per end-to-end sample"),
             QString(),
             line(QStringLiteral("CPU compression"), cpu_compression),
+            line(QStringLiteral("CPU compressed upload"), cpu_upload),
             line(QStringLiteral("CPU end-to-end"), cpu_total),
+            QStringLiteral("GPU stages (separate serialised profiling pass)"),
             line(QStringLiteral("GPU scratch upload"), gpu_upload),
             line(QStringLiteral("GPU mip generation"), gpu_mipmap),
+            line(QStringLiteral("GPU compression pass"), gpu_compression_pass),
+            line(QStringLiteral("GPU packing pass"), gpu_packing_pass),
             line(QStringLiteral("GPU encoding"), gpu_encoding),
             line(QStringLiteral("GPU output transfer"), gpu_output_transfer),
             line(QStringLiteral("GPU compressed upload"), gpu_compressed_upload),
@@ -346,8 +586,27 @@ private:
             QStringLiteral("CPU PSNR        %1 dB").arg(cpu_psnr, 0, 'f', 2),
             QStringLiteral("GPU PSNR        %1 dB").arg(gpu_psnr, 0, 'f', 2),
         };
+        if (m_gpu_timer->is_supported()) {
+            Q_ASSERT(gpu_timing_tickets.size() == size_t(m_iterations));
+            m_pending_gpu_report = PendingGpuReport {
+                .root = std::move(root),
+                .summary = std::move(summary),
+                .tickets = std::move(gpu_timing_tickets),
+                .query_results = std::vector<std::optional<gl_engine::TextureCompressor::GpuTimings>>(size_t(m_iterations)),
+                .query_finished = std::vector<bool>(size_t(m_iterations), false),
+            };
+            return {};
+        }
+
+        root.insert(QStringLiteral("gpu_timer_query"),
+            QJsonObject {
+                { QStringLiteral("supported"), false },
+                { QStringLiteral("status"), QStringLiteral("unsupported") },
+            });
+        const auto json = QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented));
+        const auto text = summary.join('\n');
         qInfo().noquote() << json;
-        return { summary.join('\n'), json };
+        return { text, json };
     }
 
     QPointer<BenchmarkItem> m_item;
@@ -355,10 +614,12 @@ private:
     unsigned m_seen_serial = 0;
     int m_effort = 4;
     int m_batch_size = 4;
-    int m_iterations = 7;
+    int m_iterations = 10;
     bool m_mipmaps = true;
     int m_backend = 0;
     bool m_pending = false;
+    std::unique_ptr<gl_engine::TextureCompressor::GpuTimer> m_gpu_timer;
+    std::optional<PendingGpuReport> m_pending_gpu_report;
 };
 
 BenchmarkItem::BenchmarkItem(QQuickItem* parent)

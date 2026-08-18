@@ -61,7 +61,7 @@ private:
 
     int m_effort = 4;
     int m_batch_size = 4;
-    int m_iterations = 7;
+    int m_iterations = 10;
     bool m_mipmaps = true;
     int m_backend = 0;
     bool m_running = false;
