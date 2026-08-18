@@ -1,12 +1,22 @@
 uniform highp sampler2DArray source_texture;
 uniform highp int texture_width;
 uniform highp int texture_height;
+#ifdef ALP_FRAGMENT_COMPRESSION
+const highp int max_mip_levels = 16;
+uniform highp int atlas_width;
+uniform highp int total_blocks;
+uniform highp int mip_levels;
+uniform highp int level_offsets[max_mip_levels];
+uniform highp int level_blocks_x[max_mip_levels];
+uniform highp int level_blocks_y[max_mip_levels];
+layout(location = 0) out highp uvec4 encoded_pixel;
+#else
 uniform highp int blocks_x;
 uniform highp int blocks_y;
 uniform highp int mip_level;
-uniform highp int effort;
-
 flat out highp uvec2 encoded_block;
+#endif
+uniform highp int effort;
 
 highp uvec3 unpack_565(highp uint value)
 {
@@ -162,25 +172,59 @@ highp uvec2 encode_etc1(highp uvec3 pixels[16])
     return uvec2(header, byte_swap(best_indices));
 }
 
-void main()
+highp uvec2 compress_block(highp ivec2 block,
+    highp int layer,
+    highp int level,
+    highp int level_width,
+    highp int level_height)
 {
-    highp int blocks_per_layer = blocks_x * blocks_y;
-    highp int layer = gl_VertexID / blocks_per_layer;
-    highp int block_index = gl_VertexID - layer * blocks_per_layer;
-    highp ivec2 block = ivec2(block_index % blocks_x, block_index / blocks_x);
     highp ivec2 origin = block * 4;
     highp uvec3 pixels[16];
     for (int y = 0; y < 4; ++y) {
         for (int x = 0; x < 4; ++x) {
-            highp ivec2 position = min(origin + ivec2(x, y), ivec2(texture_width - 1, texture_height - 1));
-            pixels[y * 4 + x] = uvec3(round(texelFetch(source_texture, ivec3(position, layer), mip_level).rgb * 255.0));
+            highp ivec2 position = min(origin + ivec2(x, y), ivec2(level_width - 1, level_height - 1));
+            pixels[y * 4 + x] = uvec3(round(texelFetch(source_texture, ivec3(position, layer), level).rgb * 255.0));
         }
     }
 
 #ifdef ALP_COMPRESS_ETC1
-    encoded_block = encode_etc1(pixels);
+    return encode_etc1(pixels);
 #else
-    encoded_block = encode_dxt1(pixels);
+    return encode_dxt1(pixels);
 #endif
+}
+
+void main()
+{
+#ifdef ALP_FRAGMENT_COMPRESSION
+    highp int output_pixel = int(gl_FragCoord.y) * atlas_width + int(gl_FragCoord.x);
+    if (output_pixel >= total_blocks * 2)
+        discard;
+    highp int output_index = output_pixel / 2;
+
+    highp int level = 0;
+    for (int candidate = 1; candidate < max_mip_levels; ++candidate) {
+        if (candidate >= mip_levels || output_index < level_offsets[candidate])
+            break;
+        level = candidate;
+    }
+
+    highp int blocks_x_at_level = level_blocks_x[level];
+    highp int blocks_y_at_level = level_blocks_y[level];
+    highp int blocks_per_layer = blocks_x_at_level * blocks_y_at_level;
+    highp int level_index = output_index - level_offsets[level];
+    highp int layer = level_index / blocks_per_layer;
+    highp int block_index = level_index - layer * blocks_per_layer;
+    highp ivec2 block = ivec2(block_index % blocks_x_at_level, block_index / blocks_x_at_level);
+    highp uvec2 encoded = compress_block(block, layer, level, max(1, texture_width >> level), max(1, texture_height >> level));
+    highp uint word = output_pixel % 2 == 0 ? encoded.x : encoded.y;
+    encoded_pixel = uvec4(word & 0xffu, (word >> 8u) & 0xffu, (word >> 16u) & 0xffu, word >> 24u);
+#else
+    highp int blocks_per_layer = blocks_x * blocks_y;
+    highp int layer = gl_VertexID / blocks_per_layer;
+    highp int block_index = gl_VertexID - layer * blocks_per_layer;
+    highp ivec2 block = ivec2(block_index % blocks_x, block_index / blocks_x);
+    encoded_block = compress_block(block, layer, mip_level, texture_width, texture_height);
     gl_Position = vec4(0.0);
+#endif
 }

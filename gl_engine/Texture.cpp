@@ -395,16 +395,24 @@ template <typename Callable> double measure_finished_gl(Callable&& callable)
 }
 
 struct gl_engine::TextureCompressor::Impl {
+    static constexpr unsigned max_shader_mip_levels = 16;
+
     unsigned width = 0;
     unsigned height = 0;
     unsigned max_batch_size = 0;
     unsigned scratch_layers = 0;
+    GLsizei atlas_width = 0;
+    GLsizei atlas_height = 0;
     GLuint scratch_texture = 0;
     GLuint encoded_buffer = 0;
     GLuint vertex_array = 0;
     GLuint transform_feedback = 0;
-    std::unique_ptr<ShaderProgram> dxt1_program;
-    std::unique_ptr<ShaderProgram> etc1_program;
+    GLuint encoding_framebuffer = 0;
+    GLuint encoding_renderbuffer = 0;
+    std::unique_ptr<ShaderProgram> dxt1_transform_program;
+    std::unique_ptr<ShaderProgram> etc1_transform_program;
+    std::unique_ptr<ShaderProgram> dxt1_fragment_program;
+    std::unique_ptr<ShaderProgram> etc1_fragment_program;
 
     Impl(unsigned texture_width, unsigned texture_height, unsigned maximum_batch_size)
         : width(texture_width)
@@ -412,38 +420,82 @@ struct gl_engine::TextureCompressor::Impl {
         , max_batch_size(maximum_batch_size)
     {
         Q_ASSERT(width > 0 && height > 0 && max_batch_size > 0);
+        Q_ASSERT(TextureCompressor::mip_level_count(width, height) <= max_shader_mip_levels);
         auto* f = QOpenGLContext::currentContext()->extraFunctions();
-        f->glGenBuffers(1, &encoded_buffer);
-        f->glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, encoded_buffer);
         size_t maximum_size = 0;
         for (unsigned level = 0; level < TextureCompressor::mip_level_count(width, height); ++level) {
             maximum_size += TextureCompressor::compressed_level_size(
                 std::max(1u, width >> level), std::max(1u, height >> level));
         }
         maximum_size *= max_batch_size;
-        f->glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, GLsizeiptr(maximum_size), nullptr, GL_STREAM_DRAW);
-        f->glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
-        f->glGenVertexArrays(1, &vertex_array);
-        f->glGenTransformFeedbacks(1, &transform_feedback);
 
+        GLint maximum_renderbuffer_size = 0;
+        f->glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &maximum_renderbuffer_size);
+        const auto maximum_pixels = maximum_size / 4;
+        atlas_width = GLsizei(std::min(maximum_pixels, size_t(maximum_renderbuffer_size)));
+        atlas_height = GLsizei((maximum_pixels + size_t(atlas_width) - 1) / size_t(atlas_width));
+        Q_ASSERT(atlas_width > 0 && atlas_height > 0 && atlas_height <= maximum_renderbuffer_size);
+
+        f->glGenBuffers(1, &encoded_buffer);
+        f->glBindBuffer(GL_PIXEL_PACK_BUFFER, encoded_buffer);
+        f->glBufferData(GL_PIXEL_PACK_BUFFER, GLsizeiptr(size_t(atlas_width) * size_t(atlas_height) * 4), nullptr, GL_STREAM_DRAW);
+        f->glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        f->glGenVertexArrays(1, &vertex_array);
+
+        GLint previous_draw_framebuffer = 0;
+        GLint previous_read_framebuffer = 0;
+        GLint previous_renderbuffer = 0;
+        f->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_framebuffer);
+        f->glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_framebuffer);
+        f->glGetIntegerv(GL_RENDERBUFFER_BINDING, &previous_renderbuffer);
+        f->glGenFramebuffers(1, &encoding_framebuffer);
+        f->glGenRenderbuffers(1, &encoding_renderbuffer);
+        f->glBindRenderbuffer(GL_RENDERBUFFER, encoding_renderbuffer);
+        // RGBA8UI with RGBA_INTEGER/UNSIGNED_BYTE is the portable WebGL 2 integer readback path.
+        // Two pixels hold the two 32-bit words of each compressed block.
+        f->glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8UI, atlas_width, atlas_height);
+        f->glBindFramebuffer(GL_FRAMEBUFFER, encoding_framebuffer);
+        f->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, encoding_renderbuffer);
+        Q_ASSERT(f->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+        f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(previous_draw_framebuffer));
+        f->glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(previous_read_framebuffer));
+        f->glBindRenderbuffer(GL_RENDERBUFFER, GLuint(previous_renderbuffer));
+
+        dxt1_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
+            "texture_compress.vert",
+            ShaderCodeSource::FILE,
+            std::vector<QString> { QStringLiteral("#define ALP_FRAGMENT_COMPRESSION") });
+        etc1_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
+            "texture_compress.vert",
+            ShaderCodeSource::FILE,
+            std::vector<QString> { QStringLiteral("#define ALP_FRAGMENT_COMPRESSION"), QStringLiteral("#define ALP_COMPRESS_ETC1") });
+
+#if !defined(__EMSCRIPTEN__)
+        f->glGenTransformFeedbacks(1, &transform_feedback);
         const std::vector<QByteArray> varyings { QByteArrayLiteral("encoded_block") };
-        dxt1_program = std::make_unique<ShaderProgram>(
+        dxt1_transform_program = std::make_unique<ShaderProgram>(
             "texture_compress.vert", "texture_compress.frag", ShaderCodeSource::FILE, std::vector<QString> {}, varyings);
-        etc1_program = std::make_unique<ShaderProgram>("texture_compress.vert",
+        etc1_transform_program = std::make_unique<ShaderProgram>("texture_compress.vert",
             "texture_compress.frag",
             ShaderCodeSource::FILE,
             std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1") },
             varyings);
+#endif
     }
 
     ~Impl()
     {
-        dxt1_program.reset();
-        etc1_program.reset();
+        dxt1_transform_program.reset();
+        etc1_transform_program.reset();
+        dxt1_fragment_program.reset();
+        etc1_fragment_program.reset();
         if (!QOpenGLContext::currentContext())
             return;
         auto* f = QOpenGLContext::currentContext()->extraFunctions();
-        f->glDeleteTransformFeedbacks(1, &transform_feedback);
+        if (transform_feedback)
+            f->glDeleteTransformFeedbacks(1, &transform_feedback);
+        f->glDeleteFramebuffers(1, &encoding_framebuffer);
+        f->glDeleteRenderbuffers(1, &encoding_renderbuffer);
         f->glDeleteVertexArrays(1, &vertex_array);
         f->glDeleteBuffers(1, &encoded_buffer);
         if (scratch_texture)
@@ -506,6 +558,15 @@ bool gl_engine::TextureCompressor::is_supported()
 #endif
 }
 
+bool gl_engine::TextureCompressor::is_backend_supported(Backend backend)
+{
+#if defined(__EMSCRIPTEN__)
+    return backend == Backend::FragmentShader;
+#else
+    return backend == Backend::FragmentShader || backend == Backend::TransformFeedback;
+#endif
+}
+
 gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std::span<const radix::Raster<glm::u8vec4>> textures,
     Texture& destination,
     std::span<const unsigned> destination_layers,
@@ -520,6 +581,7 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
     Q_ASSERT(destination.m_width == m->width && destination.m_height == m->height);
     Q_ASSERT(settings.algorithm == Texture::compression_algorithm());
     Q_ASSERT(settings.effort <= 10);
+    Q_ASSERT(is_backend_supported(settings.backend));
     for (size_t i = 0; i < textures.size(); ++i) {
         Q_ASSERT(unsigned(textures[i].width()) == m->width && unsigned(textures[i].height()) == m->height);
         Q_ASSERT(destination_layers[i] < destination.m_n_layers);
@@ -555,53 +617,131 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
     }
 
     std::vector<size_t> level_offsets;
+    std::vector<int> level_offsets_blocks;
+    std::vector<int> level_blocks_x;
+    std::vector<int> level_blocks_y;
     level_offsets.reserve(result.mip_levels);
+    level_offsets_blocks.reserve(result.mip_levels);
+    level_blocks_x.reserve(result.mip_levels);
+    level_blocks_y.reserve(result.mip_levels);
     size_t total_encoded_size = 0;
     for (unsigned level = 0; level < result.mip_levels; ++level) {
         level_offsets.push_back(total_encoded_size);
         const auto level_width = std::max(1u, m->width >> level);
         const auto level_height = std::max(1u, m->height >> level);
+        level_offsets_blocks.push_back(int(total_encoded_size / 8));
+        level_blocks_x.push_back(int(std::max(1u, (level_width + 3) / 4)));
+        level_blocks_y.push_back(int(std::max(1u, (level_height + 3) / 4)));
         total_encoded_size += compressed_level_size(level_width, level_height) * textures.size();
     }
     result.encoded_bytes = total_encoded_size;
 
-    result.timings.encoding_ms = measure_finished_gl([&]() {
-        auto* program = settings.algorithm == nucleus::utils::ColourTexture::Format::DXT1 ? m->dxt1_program.get() : m->etc1_program.get();
-        program->bind();
-        program->set_uniform("source_texture", 7);
-        program->set_uniform("effort", int(settings.effort));
-        f->glActiveTexture(GL_TEXTURE7);
-        f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
-        f->glBindVertexArray(m->vertex_array);
-        f->glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, m->transform_feedback);
-        f->glEnable(GL_RASTERIZER_DISCARD);
+    if (settings.backend == Backend::TransformFeedback) {
+        result.timings.encoding_ms = measure_finished_gl([&]() {
+            auto* program = settings.algorithm == nucleus::utils::ColourTexture::Format::DXT1 ? m->dxt1_transform_program.get() : m->etc1_transform_program.get();
+            program->bind();
+            program->set_uniform("source_texture", 7);
+            program->set_uniform("effort", int(settings.effort));
+            f->glActiveTexture(GL_TEXTURE7);
+            f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
+            f->glBindVertexArray(m->vertex_array);
+            f->glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, m->transform_feedback);
+            f->glEnable(GL_RASTERIZER_DISCARD);
 
-        for (unsigned level = 0; level < result.mip_levels; ++level) {
-            const auto level_width = std::max(1u, m->width >> level);
-            const auto level_height = std::max(1u, m->height >> level);
-            const auto blocks_x = std::max(1u, (level_width + 3) / 4);
-            const auto blocks_y = std::max(1u, (level_height + 3) / 4);
-            const auto level_size = compressed_level_size(level_width, level_height) * textures.size();
-            program->set_uniform("texture_width", int(level_width));
-            program->set_uniform("texture_height", int(level_height));
-            program->set_uniform("blocks_x", int(blocks_x));
-            program->set_uniform("blocks_y", int(blocks_y));
-            program->set_uniform("mip_level", int(level));
-            f->glBindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER,
-                0,
-                m->encoded_buffer,
-                GLintptr(level_offsets[level]),
-                GLsizeiptr(level_size));
-            f->glBeginTransformFeedback(GL_POINTS);
-            f->glDrawArrays(GL_POINTS, 0, GLsizei(blocks_x * blocks_y * textures.size()));
-            f->glEndTransformFeedback();
-        }
+            for (unsigned level = 0; level < result.mip_levels; ++level) {
+                const auto level_width = std::max(1u, m->width >> level);
+                const auto level_height = std::max(1u, m->height >> level);
+                const auto level_size = compressed_level_size(level_width, level_height) * textures.size();
+                program->set_uniform("texture_width", int(level_width));
+                program->set_uniform("texture_height", int(level_height));
+                program->set_uniform("blocks_x", level_blocks_x[level]);
+                program->set_uniform("blocks_y", level_blocks_y[level]);
+                program->set_uniform("mip_level", int(level));
+                f->glBindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER,
+                    0,
+                    m->encoded_buffer,
+                    GLintptr(level_offsets[level]),
+                    GLsizeiptr(level_size));
+                f->glBeginTransformFeedback(GL_POINTS);
+                f->glDrawArrays(GL_POINTS, 0, GLsizei(level_blocks_x[level] * level_blocks_y[level] * int(textures.size())));
+                f->glEndTransformFeedback();
+            }
 
-        f->glDisable(GL_RASTERIZER_DISCARD);
-        f->glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
-        f->glBindVertexArray(0);
-        program->release();
-    });
+            f->glDisable(GL_RASTERIZER_DISCARD);
+            f->glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
+            f->glBindVertexArray(0);
+            program->release();
+        });
+    } else {
+        result.timings.encoding_ms = measure_finished_gl([&]() {
+            auto* program = settings.algorithm == nucleus::utils::ColourTexture::Format::DXT1 ? m->dxt1_fragment_program.get() : m->etc1_fragment_program.get();
+            GLint previous_draw_framebuffer = 0;
+            GLint previous_viewport[4] = {};
+            GLboolean previous_colour_mask[4] = {};
+            f->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_framebuffer);
+            f->glGetIntegerv(GL_VIEWPORT, previous_viewport);
+            f->glGetBooleanv(GL_COLOR_WRITEMASK, previous_colour_mask);
+            const auto blend_enabled = f->glIsEnabled(GL_BLEND);
+            const auto cull_enabled = f->glIsEnabled(GL_CULL_FACE);
+            const auto depth_enabled = f->glIsEnabled(GL_DEPTH_TEST);
+            const auto scissor_enabled = f->glIsEnabled(GL_SCISSOR_TEST);
+
+            f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m->encoding_framebuffer);
+            f->glViewport(0, 0, m->atlas_width, m->atlas_height);
+            f->glDisable(GL_BLEND);
+            f->glDisable(GL_CULL_FACE);
+            f->glDisable(GL_DEPTH_TEST);
+            f->glDisable(GL_SCISSOR_TEST);
+            f->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            program->bind();
+            program->set_uniform("source_texture", 7);
+            program->set_uniform("texture_width", int(m->width));
+            program->set_uniform("texture_height", int(m->height));
+            program->set_uniform("effort", int(settings.effort));
+            program->set_uniform("atlas_width", int(m->atlas_width));
+            program->set_uniform("total_blocks", int(total_encoded_size / 8));
+            program->set_uniform("mip_levels", int(result.mip_levels));
+            program->set_uniform_array("level_offsets", level_offsets_blocks);
+            program->set_uniform_array("level_blocks_x", level_blocks_x);
+            program->set_uniform_array("level_blocks_y", level_blocks_y);
+            f->glActiveTexture(GL_TEXTURE7);
+            f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
+            f->glBindVertexArray(m->vertex_array);
+            f->glDrawArrays(GL_TRIANGLES, 0, 3);
+            f->glBindVertexArray(0);
+            program->release();
+
+            if (blend_enabled)
+                f->glEnable(GL_BLEND);
+            if (cull_enabled)
+                f->glEnable(GL_CULL_FACE);
+            if (depth_enabled)
+                f->glEnable(GL_DEPTH_TEST);
+            if (scissor_enabled)
+                f->glEnable(GL_SCISSOR_TEST);
+            f->glColorMask(previous_colour_mask[0], previous_colour_mask[1], previous_colour_mask[2], previous_colour_mask[3]);
+            f->glViewport(previous_viewport[0], previous_viewport[1], previous_viewport[2], previous_viewport[3]);
+            f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(previous_draw_framebuffer));
+        });
+
+        result.timings.output_transfer_ms = measure_finished_gl([&]() {
+            GLint previous_read_framebuffer = 0;
+            GLint previous_read_buffer = 0;
+            GLint previous_pack_alignment = 0;
+            f->glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_framebuffer);
+            f->glGetIntegerv(GL_READ_BUFFER, &previous_read_buffer);
+            f->glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack_alignment);
+            f->glBindFramebuffer(GL_READ_FRAMEBUFFER, m->encoding_framebuffer);
+            f->glReadBuffer(GL_COLOR_ATTACHMENT0);
+            f->glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            f->glBindBuffer(GL_PIXEL_PACK_BUFFER, m->encoded_buffer);
+            f->glReadPixels(0, 0, m->atlas_width, m->atlas_height, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, nullptr);
+            f->glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+            f->glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
+            f->glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(previous_read_framebuffer));
+            f->glReadBuffer(GLenum(previous_read_buffer));
+        });
+    }
 
     result.timings.compressed_upload_ms = measure_finished_gl([&]() {
         f->glBindTexture(GL_TEXTURE_2D_ARRAY, destination.m_id);
@@ -630,6 +770,6 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
     });
     f->glActiveTexture(GL_TEXTURE0);
     result.timings.total_ms = result.timings.scratch_upload_ms + result.timings.mipmap_generation_ms + result.timings.encoding_ms
-        + result.timings.compressed_upload_ms;
+        + result.timings.output_transfer_ms + result.timings.compressed_upload_ms;
     return result;
 }

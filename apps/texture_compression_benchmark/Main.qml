@@ -100,6 +100,25 @@ ApplicationWindow {
 
                         Label {
                             Layout.fillWidth: true
+                            text: qsTr("GPU encoder")
+                        }
+
+                        ComboBox {
+                            Layout.preferredWidth: 220
+                            model: benchmark.transformFeedbackSupported
+                                ? [qsTr("Fragment shader + PBO"), qsTr("Transform feedback")]
+                                : [qsTr("Fragment shader + PBO")]
+                            currentIndex: benchmark.backend
+                            enabled: !benchmark.running && benchmark.transformFeedbackSupported
+                            onActivated: benchmark.backend = currentIndex
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+
+                        Label {
+                            Layout.fillWidth: true
                             text: qsTr("Measured iterations")
                         }
 

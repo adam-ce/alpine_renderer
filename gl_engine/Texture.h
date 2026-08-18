@@ -91,16 +91,20 @@ private:
 
 class TextureCompressor {
 public:
+    enum class Backend { FragmentShader, TransformFeedback };
+
     struct Settings {
         nucleus::utils::ColourTexture::Format algorithm = nucleus::utils::ColourTexture::Format::DXT1;
         unsigned effort = 0;
         bool generate_mipmaps = true;
+        Backend backend = Backend::FragmentShader;
     };
 
     struct Timings {
         double scratch_upload_ms = 0.0;
         double mipmap_generation_ms = 0.0;
         double encoding_ms = 0.0;
+        double output_transfer_ms = 0.0;
         double compressed_upload_ms = 0.0;
         double total_ms = 0.0;
     };
@@ -126,6 +130,7 @@ public:
     [[nodiscard]] static size_t compressed_level_size(unsigned width, unsigned height);
     [[nodiscard]] static unsigned mip_level_count(unsigned width, unsigned height);
     [[nodiscard]] static bool is_supported();
+    [[nodiscard]] static bool is_backend_supported(Backend backend);
 
 private:
     struct Impl;

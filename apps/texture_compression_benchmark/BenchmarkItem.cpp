@@ -165,6 +165,7 @@ public:
         m_batch_size = benchmark_item->m_batch_size;
         m_iterations = benchmark_item->m_iterations;
         m_mipmaps = benchmark_item->m_mipmaps;
+        m_backend = benchmark_item->m_backend;
         m_pending = true;
     }
 
@@ -218,6 +219,11 @@ private:
         }
 
         const auto algorithm = gl_engine::Texture::compression_algorithm();
+        const auto backend = m_backend == 0 ? gl_engine::TextureCompressor::Backend::FragmentShader
+                                            : gl_engine::TextureCompressor::Backend::TransformFeedback;
+        const auto backend_name = backend == gl_engine::TextureCompressor::Backend::FragmentShader
+            ? QStringLiteral("Fragment shader + PBO")
+            : QStringLiteral("Transform feedback");
         const auto filter = m_mipmaps ? gl_engine::Texture::Filter::MipMapLinear : gl_engine::Texture::Filter::Linear;
         gl_engine::Texture cpu_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
         cpu_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
@@ -238,13 +244,14 @@ private:
         static_cast<void>(gpu_compressor.compress(sources,
             gpu_destination,
             layers,
-            { .algorithm = algorithm, .effort = unsigned(m_effort), .generate_mipmaps = m_mipmaps }));
+            { .algorithm = algorithm, .effort = unsigned(m_effort), .generate_mipmaps = m_mipmaps, .backend = backend }));
 
         std::vector<double> cpu_compression_times;
         std::vector<double> cpu_total_times;
         std::vector<double> gpu_upload_times;
         std::vector<double> gpu_mipmap_times;
         std::vector<double> gpu_encoding_times;
+        std::vector<double> gpu_output_transfer_times;
         std::vector<double> gpu_compressed_upload_times;
         std::vector<double> gpu_total_times;
         cpu_compression_times.reserve(size_t(m_iterations));
@@ -262,10 +269,11 @@ private:
             const auto gpu = gpu_compressor.compress(sources,
                 gpu_destination,
                 layers,
-                { .algorithm = algorithm, .effort = unsigned(m_effort), .generate_mipmaps = m_mipmaps });
+                { .algorithm = algorithm, .effort = unsigned(m_effort), .generate_mipmaps = m_mipmaps, .backend = backend });
             gpu_upload_times.push_back(gpu.timings.scratch_upload_ms);
             gpu_mipmap_times.push_back(gpu.timings.mipmap_generation_ms);
             gpu_encoding_times.push_back(gpu.timings.encoding_ms);
+            gpu_output_transfer_times.push_back(gpu.timings.output_transfer_ms);
             gpu_compressed_upload_times.push_back(gpu.timings.compressed_upload_ms);
             gpu_total_times.push_back(gpu.timings.total_ms);
         }
@@ -275,6 +283,7 @@ private:
         const auto gpu_upload = statistics(gpu_upload_times);
         const auto gpu_mipmap = statistics(gpu_mipmap_times);
         const auto gpu_encoding = statistics(gpu_encoding_times);
+        const auto gpu_output_transfer = statistics(gpu_output_transfer_times);
         const auto gpu_compressed_upload = statistics(gpu_compressed_upload_times);
         const auto gpu_total = statistics(gpu_total_times);
         const auto cpu_psnr = linear_psnr(reconstruct(cpu_destination, resolution), source);
@@ -287,6 +296,7 @@ private:
             { QStringLiteral("version"), gl_string(GL_VERSION) },
             { QStringLiteral("supported"), true },
             { QStringLiteral("algorithm"), algorithm_name },
+            { QStringLiteral("gpu_backend"), backend_name },
             { QStringLiteral("timing_method"), QStringLiteral("glFinish-synchronised wall time") },
             { QStringLiteral("resolution"), int(resolution) },
             { QStringLiteral("batch_size"), m_batch_size },
@@ -298,6 +308,7 @@ private:
             { QStringLiteral("gpu_scratch_upload"), to_json(gpu_upload) },
             { QStringLiteral("gpu_mipmap_generation"), to_json(gpu_mipmap) },
             { QStringLiteral("gpu_encoding"), to_json(gpu_encoding) },
+            { QStringLiteral("gpu_output_transfer"), to_json(gpu_output_transfer) },
             { QStringLiteral("gpu_compressed_upload"), to_json(gpu_compressed_upload) },
             { QStringLiteral("gpu_end_to_end"), to_json(gpu_total) },
             { QStringLiteral("cpu_psnr_db"), cpu_psnr },
@@ -317,6 +328,7 @@ private:
                 .arg(m_batch_size)
                 .arg(m_effort)
                 .arg(m_mipmaps ? QStringLiteral("on") : QStringLiteral("off")),
+            backend_name,
             gl_string(GL_RENDERER),
             QStringLiteral("Timing: completion-synchronised wall time"),
             QString(),
@@ -325,6 +337,7 @@ private:
             line(QStringLiteral("GPU scratch upload"), gpu_upload),
             line(QStringLiteral("GPU mip generation"), gpu_mipmap),
             line(QStringLiteral("GPU encoding"), gpu_encoding),
+            line(QStringLiteral("GPU output transfer"), gpu_output_transfer),
             line(QStringLiteral("GPU compressed upload"), gpu_compressed_upload),
             line(QStringLiteral("GPU end-to-end"), gpu_total),
             QString(),
@@ -344,6 +357,7 @@ private:
     int m_batch_size = 4;
     int m_iterations = 7;
     bool m_mipmaps = true;
+    int m_backend = 0;
     bool m_pending = false;
 };
 
@@ -392,6 +406,22 @@ void BenchmarkItem::setMipmaps(bool value)
         return;
     m_mipmaps = value;
     emit mipmapsChanged();
+}
+
+int BenchmarkItem::backend() const { return m_backend; }
+void BenchmarkItem::setBackend(int value)
+{
+    if (value < 0 || value > 1 || (value == 1 && !transformFeedbackSupported()))
+        return;
+    if (m_backend == value)
+        return;
+    m_backend = value;
+    emit backendChanged();
+}
+
+bool BenchmarkItem::transformFeedbackSupported() const
+{
+    return gl_engine::TextureCompressor::is_backend_supported(gl_engine::TextureCompressor::Backend::TransformFeedback);
 }
 
 bool BenchmarkItem::running() const { return m_running; }
