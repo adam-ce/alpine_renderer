@@ -9,7 +9,6 @@
 #include <QClipboard>
 #include <QGuiApplication>
 #include <QImage>
-#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QOpenGLContext>
@@ -45,12 +44,6 @@ struct Statistics {
     double maximum = 0.0;
 };
 
-struct ObservedGlError {
-    QString stage;
-    int iteration = -1;
-    GLenum code = GL_NO_ERROR;
-};
-
 Statistics statistics(std::vector<double> values)
 {
     Q_ASSERT(!values.empty());
@@ -68,74 +61,6 @@ QJsonObject to_json(const Statistics& value)
         { QStringLiteral("p95_ms"), value.p95 },
         { QStringLiteral("min_ms"), value.minimum },
         { QStringLiteral("max_ms"), value.maximum } };
-}
-
-QString gl_error_name(GLenum error)
-{
-    switch (error) {
-    case GL_INVALID_ENUM:
-        return QStringLiteral("GL_INVALID_ENUM");
-    case GL_INVALID_VALUE:
-        return QStringLiteral("GL_INVALID_VALUE");
-    case GL_INVALID_OPERATION:
-        return QStringLiteral("GL_INVALID_OPERATION");
-    case GL_INVALID_FRAMEBUFFER_OPERATION:
-        return QStringLiteral("GL_INVALID_FRAMEBUFFER_OPERATION");
-    case GL_OUT_OF_MEMORY:
-        return QStringLiteral("GL_OUT_OF_MEMORY");
-    case 0x0507:
-        return QStringLiteral("GL_CONTEXT_LOST");
-    default:
-        return QStringLiteral("UNKNOWN_GL_ERROR");
-    }
-}
-
-QJsonArray to_json(const std::vector<ObservedGlError>& errors)
-{
-    QJsonArray result;
-    for (const auto& error : errors) {
-        QJsonObject object {
-            { QStringLiteral("stage"), error.stage },
-            { QStringLiteral("name"), gl_error_name(error.code) },
-            { QStringLiteral("code"), int(error.code) },
-            { QStringLiteral("code_hex"), QStringLiteral("0x%1").arg(error.code, 4, 16, QLatin1Char('0')) },
-        };
-        object.insert(QStringLiteral("iteration"), error.iteration < 0 ? QJsonValue(QJsonValue::Null) : QJsonValue(error.iteration));
-        result.append(object);
-    }
-    return result;
-}
-
-QString compressor_stage_name(gl_engine::TextureCompressor::Stage stage)
-{
-    using Stage = gl_engine::TextureCompressor::Stage;
-    switch (stage) {
-    case Stage::ScratchUpload:
-        return QStringLiteral("gpu_scratch_upload");
-    case Stage::MipmapGeneration:
-        return QStringLiteral("gpu_mipmap_generation");
-    case Stage::Encoding:
-        return QStringLiteral("gpu_encoding");
-    case Stage::CompressedUpload:
-        return QStringLiteral("gpu_compressed_upload");
-    }
-    return QStringLiteral("gpu_unknown");
-}
-
-void collect_gl_errors(std::vector<ObservedGlError>& errors, QString stage, int iteration = -1)
-{
-    auto* f = QOpenGLContext::currentContext()->extraFunctions();
-    while (const auto error = f->glGetError())
-        errors.push_back({ stage, iteration, error });
-}
-
-void collect_gl_errors(std::vector<ObservedGlError>& errors,
-    const gl_engine::TextureCompressor::Result& result,
-    QString stage_prefix,
-    int iteration = -1)
-{
-    for (const auto& error : result.gl_errors)
-        errors.push_back({ stage_prefix + compressor_stage_name(error.stage), iteration, error.code });
 }
 
 double elapsed_ms(Clock::time_point start)
@@ -293,8 +218,6 @@ private:
         }
 
         const auto algorithm = gl_engine::Texture::compression_algorithm();
-        while (QOpenGLContext::currentContext()->extraFunctions()->glGetError() != GL_NO_ERROR) { }
-        std::vector<ObservedGlError> gl_errors;
         const auto filter = m_mipmaps ? gl_engine::Texture::Filter::MipMapLinear : gl_engine::Texture::Filter::Linear;
         gl_engine::Texture cpu_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
         cpu_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
@@ -303,7 +226,6 @@ private:
         gpu_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
         gpu_destination.allocate_array(resolution, resolution, unsigned(m_batch_size));
         gl_engine::TextureCompressor gpu_compressor(resolution, resolution, unsigned(m_batch_size));
-        collect_gl_errors(gl_errors, QStringLiteral("setup"));
 
         auto upload_cpu = [&](const std::vector<nucleus::utils::MipmappedColourTexture>& compressed) {
             for (size_t layer = 0; layer < compressed.size(); ++layer)
@@ -313,12 +235,10 @@ private:
 
         auto warmup_cpu = cpu_compress(sources, algorithm, m_mipmaps);
         upload_cpu(warmup_cpu);
-        collect_gl_errors(gl_errors, QStringLiteral("warmup_cpu_upload"));
-        const auto warmup_gpu = gpu_compressor.compress(sources,
+        static_cast<void>(gpu_compressor.compress(sources,
             gpu_destination,
             layers,
-            { .algorithm = algorithm, .effort = unsigned(m_effort), .generate_mipmaps = m_mipmaps });
-        collect_gl_errors(gl_errors, warmup_gpu, QStringLiteral("warmup_"));
+            { .algorithm = algorithm, .effort = unsigned(m_effort), .generate_mipmaps = m_mipmaps }));
 
         std::vector<double> cpu_compression_times;
         std::vector<double> cpu_total_times;
@@ -336,7 +256,6 @@ private:
             auto compressed = cpu_compress(sources, algorithm, m_mipmaps);
             const auto cpu_compression_time = elapsed_ms(cpu_start);
             upload_cpu(compressed);
-            collect_gl_errors(gl_errors, QStringLiteral("cpu_upload"), iteration);
             cpu_compression_times.push_back(cpu_compression_time);
             cpu_total_times.push_back(elapsed_ms(cpu_start));
 
@@ -344,7 +263,6 @@ private:
                 gpu_destination,
                 layers,
                 { .algorithm = algorithm, .effort = unsigned(m_effort), .generate_mipmaps = m_mipmaps });
-            collect_gl_errors(gl_errors, gpu, QString(), iteration);
             gpu_upload_times.push_back(gpu.timings.scratch_upload_ms);
             gpu_mipmap_times.push_back(gpu.timings.mipmap_generation_ms);
             gpu_encoding_times.push_back(gpu.timings.encoding_ms);
@@ -359,12 +277,8 @@ private:
         const auto gpu_encoding = statistics(gpu_encoding_times);
         const auto gpu_compressed_upload = statistics(gpu_compressed_upload_times);
         const auto gpu_total = statistics(gpu_total_times);
-        const auto cpu_reconstructed = reconstruct(cpu_destination, resolution);
-        collect_gl_errors(gl_errors, QStringLiteral("cpu_reconstruction"));
-        const auto cpu_psnr = linear_psnr(cpu_reconstructed, source);
-        const auto gpu_reconstructed = reconstruct(gpu_destination, resolution);
-        collect_gl_errors(gl_errors, QStringLiteral("gpu_reconstruction"));
-        const auto gpu_psnr = linear_psnr(gpu_reconstructed, source);
+        const auto cpu_psnr = linear_psnr(reconstruct(cpu_destination, resolution), source);
+        const auto gpu_psnr = linear_psnr(reconstruct(gpu_destination, resolution), source);
         const auto algorithm_name = algorithm == nucleus::utils::ColourTexture::Format::DXT1 ? QStringLiteral("DXT1 / BC1") : QStringLiteral("ETC1 in ETC2");
 
         QJsonObject root {
@@ -388,8 +302,6 @@ private:
             { QStringLiteral("gpu_end_to_end"), to_json(gpu_total) },
             { QStringLiteral("cpu_psnr_db"), cpu_psnr },
             { QStringLiteral("gpu_psnr_db"), gpu_psnr },
-            { QStringLiteral("gl_error_count"), int(gl_errors.size()) },
-            { QStringLiteral("gl_errors"), to_json(gl_errors) },
             { QStringLiteral("cpu_tiles_per_second"), 1000.0 * m_batch_size / cpu_total.median },
             { QStringLiteral("gpu_tiles_per_second"), 1000.0 * m_batch_size / gpu_total.median },
         };
@@ -420,7 +332,6 @@ private:
             QStringLiteral("GPU completed throughput  %1 tiles/s").arg(1000.0 * m_batch_size / gpu_total.median, 0, 'f', 1),
             QStringLiteral("CPU PSNR        %1 dB").arg(cpu_psnr, 0, 'f', 2),
             QStringLiteral("GPU PSNR        %1 dB").arg(gpu_psnr, 0, 'f', 2),
-            QStringLiteral("GL errors       %1").arg(gl_errors.size()),
         };
         qInfo().noquote() << json;
         return { summary.join('\n'), json };

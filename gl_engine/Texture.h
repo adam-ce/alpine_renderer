@@ -91,8 +91,6 @@ private:
 
 class TextureCompressor {
 public:
-    enum class Stage { ScratchUpload, MipmapGeneration, Encoding, CompressedUpload };
-
     struct Settings {
         nucleus::utils::ColourTexture::Format algorithm = nucleus::utils::ColourTexture::Format::DXT1;
         unsigned effort = 0;
@@ -108,13 +106,7 @@ public:
     };
 
     struct Result {
-        struct GlError {
-            Stage stage;
-            GLenum code = GL_NO_ERROR;
-        };
-
         Timings timings;
-        std::vector<GlError> gl_errors;
         size_t encoded_bytes = 0;
         unsigned mip_levels = 0;
     };
