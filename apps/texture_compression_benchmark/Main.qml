@@ -47,7 +47,7 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.leftMargin: 20
                 Layout.rightMargin: 20
-                text: qsTr("Measures DXT1 or ETC1 compression of 512×512 ortho textures, including optional mipmaps and final texture-array upload. WebGL requires ETC or sRGB S3TC compressed textures.")
+                text: qsTr("Measures DXT1 or ETC1 compression of varied 512×512 ortho imagery in batches of four. Quality is computed once over all 16 images; timing covers three rounds of four distinct batches. WebGL requires ETC or sRGB S3TC compressed textures.")
                 wrapMode: Text.Wrap
             }
 
@@ -82,49 +82,12 @@ ApplicationWindow {
 
                         Label {
                             Layout.fillWidth: true
-                            text: qsTr("Batch size")
-                        }
-
-                        ComboBox {
-                            id: batchSizeBox
-                            Layout.preferredWidth: 120
-                            model: [1, 4, 16]
-                            currentIndex: 1
-                            enabled: !benchmark.running
-                            onActivated: benchmark.batchSize = Number(currentText)
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-
-                        Label {
-                            Layout.fillWidth: true
                             text: qsTr("GPU encoder")
                         }
 
                         Label {
                             Layout.preferredWidth: 220
                             text: qsTr("Fragment shader + PBO")
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-
-                        Label {
-                            Layout.fillWidth: true
-                            text: qsTr("Measured iterations")
-                        }
-
-                        SpinBox {
-                            Layout.preferredWidth: 120
-                            from: 1
-                            to: 50
-                            value: benchmark.iterations
-                            editable: true
-                            enabled: !benchmark.running
-                            onValueModified: benchmark.iterations = value
                         }
                     }
 
@@ -145,7 +108,7 @@ ApplicationWindow {
 
                 Button {
                     text: qsTr("Run benchmark")
-                    enabled: !benchmark.running
+                    enabled: benchmark.dataReady && !benchmark.running
                     highlighted: true
                     onClicked: benchmark.runBenchmark()
                 }
@@ -159,7 +122,9 @@ ApplicationWindow {
 
                 Label {
                     Layout.fillWidth: true
-                    text: benchmark.running ? qsTr("Benchmarking; the display may pause to avoid contaminating GPU measurements.") : qsTr("Ready")
+                    text: benchmark.running
+                        ? qsTr("Computing PSNR, then measuring batch size 4; the display may pause to avoid contaminating GPU measurements.")
+                        : benchmark.dataStatus
                     wrapMode: Text.Wrap
                 }
             }
@@ -183,11 +148,54 @@ ApplicationWindow {
                         wrapMode: TextEdit.Wrap
                     }
 
-                    Button {
-                        text: qsTr("Copy JSON")
-                        enabled: !benchmark.running && benchmark.resultJson.length > 0
-                        onClicked: benchmark.copyResultJson()
+                    RowLayout {
+                        Layout.fillWidth: true
+
+                        Button {
+                            text: qsTr("Preview compressed tiles")
+                            enabled: !benchmark.running && benchmark.previewSource.length > 0
+                            onClicked: previewDialogLoader.active = true
+                        }
+
+                        Button {
+                            text: qsTr("Copy JSON")
+                            enabled: !benchmark.running && benchmark.resultJson.length > 0
+                            onClicked: benchmark.copyResultJson()
+                        }
                     }
+                }
+            }
+        }
+    }
+
+    Loader {
+        id: previewDialogLoader
+
+        active: false
+        asynchronous: true
+        onLoaded: {
+            if (status === Loader.Ready)
+                item.open()
+        }
+
+        sourceComponent: Component {
+            Dialog {
+                id: previewDialog
+
+                parent: Overlay.overlay
+                anchors.centerIn: parent
+                width: Math.min(root.width - 40, 820)
+                height: Math.min(root.height - 40, 880)
+                modal: true
+                title: qsTr("GPU-compressed tiles")
+                standardButtons: Dialog.Close
+                onClosed: previewDialogLoader.active = false
+
+                contentItem: Image {
+                    source: benchmark.previewSource
+                    sourceSize: Qt.size(2048, 2048)
+                    asynchronous: true
+                    fillMode: Image.PreserveAspectFit
                 }
             }
         }

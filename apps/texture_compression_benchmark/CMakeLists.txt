@@ -19,22 +19,17 @@ qt_add_qml_module(texture_compression_benchmark
     QML_FILES Main.qml
 )
 
-qt_add_resources(texture_compression_benchmark "benchmark_data"
-    PREFIX "/benchmark"
-    BASE "${CMAKE_SOURCE_DIR}/unittests/nucleus/data/quad"
-    FILES "${CMAKE_SOURCE_DIR}/unittests/nucleus/data/quad/merged.jpg"
-)
-
 qt_add_resources(texture_compression_benchmark "fonts"
     BASE "${alpineapp_fonts_SOURCE_DIR}"
     PREFIX "/fonts"
     FILES "${alpineapp_fonts_SOURCE_DIR}/Roboto/Roboto-Regular.ttf"
 )
 
-target_link_libraries(texture_compression_benchmark PUBLIC gl_engine Qt::Quick Qt::QuickControls2)
+target_link_libraries(texture_compression_benchmark PUBLIC gl_engine Qt::Network Qt::Quick Qt::QuickControls2)
 alp_configure_target(texture_compression_benchmark)
 
 if (ANDROID)
+    add_android_openssl_libraries(texture_compression_benchmark)
     set_target_properties(texture_compression_benchmark PROPERTIES
         QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android"
         QT_ANDROID_PACKAGE_NAME "org.alpinemaps.texturecompressionbenchmark"

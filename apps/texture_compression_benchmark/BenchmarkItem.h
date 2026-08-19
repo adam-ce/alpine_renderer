@@ -6,20 +6,25 @@
 
 #pragma once
 
+#include <QImage>
 #include <QQuickFramebufferObject>
 #include <QString>
 #include <QtQmlIntegration>
+#include <vector>
+
+class QNetworkAccessManager;
 
 class BenchmarkItem : public QQuickFramebufferObject {
     Q_OBJECT
     QML_ELEMENT
     Q_PROPERTY(int effort READ effort WRITE setEffort NOTIFY effortChanged)
-    Q_PROPERTY(int batchSize READ batchSize WRITE setBatchSize NOTIFY batchSizeChanged)
-    Q_PROPERTY(int iterations READ iterations WRITE setIterations NOTIFY iterationsChanged)
     Q_PROPERTY(bool mipmaps READ mipmaps WRITE setMipmaps NOTIFY mipmapsChanged)
+    Q_PROPERTY(bool dataReady READ dataReady NOTIFY dataReadyChanged)
+    Q_PROPERTY(QString dataStatus READ dataStatus NOTIFY dataStatusChanged)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
     Q_PROPERTY(QString resultText READ resultText NOTIFY resultTextChanged)
     Q_PROPERTY(QString resultJson READ resultJson NOTIFY resultJsonChanged)
+    Q_PROPERTY(QString previewSource READ previewSource NOTIFY previewSourceChanged)
 
 public:
     explicit BenchmarkItem(QQuickItem* parent = nullptr);
@@ -27,38 +32,45 @@ public:
 
     [[nodiscard]] int effort() const;
     void setEffort(int value);
-    [[nodiscard]] int batchSize() const;
-    void setBatchSize(int value);
-    [[nodiscard]] int iterations() const;
-    void setIterations(int value);
     [[nodiscard]] bool mipmaps() const;
     void setMipmaps(bool value);
+    [[nodiscard]] bool dataReady() const;
+    [[nodiscard]] QString dataStatus() const;
     [[nodiscard]] bool running() const;
     [[nodiscard]] QString resultText() const;
     [[nodiscard]] QString resultJson() const;
+    [[nodiscard]] QString previewSource() const;
 
     Q_INVOKABLE void runBenchmark();
     Q_INVOKABLE void copyResultJson();
 
 signals:
     void effortChanged();
-    void batchSizeChanged();
-    void iterationsChanged();
     void mipmapsChanged();
+    void dataReadyChanged();
+    void dataStatusChanged();
     void runningChanged();
     void resultTextChanged();
     void resultJsonChanged();
+    void previewSourceChanged();
 
 private:
     friend class BenchmarkRenderer;
-    void publishResults(const QString& text, const QString& json);
+    void downloadBenchmarkData();
+    void stitchBenchmarkData();
+    void publishResults(const QString& text, const QString& json, const QString& preview_source);
 
     int m_effort = 4;
-    int m_batch_size = 4;
-    int m_iterations = 10;
     bool m_mipmaps = true;
+    bool m_data_ready = false;
     bool m_running = false;
     unsigned m_request_serial = 0;
-    QString m_result_text = QStringLiteral("Run the benchmark to collect results.");
+    int m_downloads_remaining = 0;
+    QNetworkAccessManager* m_network_manager = nullptr;
+    std::vector<QImage> m_downloaded_tiles;
+    std::vector<QImage> m_source_images;
+    QString m_data_status = QStringLiteral("Downloading benchmark imagery…");
+    QString m_result_text = QStringLiteral("Waiting for benchmark imagery.");
     QString m_result_json;
+    QString m_preview_source;
 };

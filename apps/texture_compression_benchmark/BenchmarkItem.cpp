@@ -6,18 +6,24 @@
 
 #include "BenchmarkItem.h"
 
+#include <QBuffer>
 #include <QClipboard>
 #include <QGuiApplication>
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QOpenGLContext>
 #include <QOpenGLExtraFunctions>
 #include <QOpenGLFramebufferObject>
 #include <QOpenGLFramebufferObjectFormat>
 #include <QPointer>
+#include <QPainter>
 #include <QQuickWindow>
+#include <QUrl>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -41,6 +47,62 @@
 namespace {
 using Raster = radix::Raster<glm::u8vec4>;
 using Clock = std::chrono::steady_clock;
+
+struct TileGroup {
+    const char* name;
+    const char* category;
+    int zoom;
+    int y;
+    int x;
+};
+
+constexpr std::array<TileGroup, 16> tile_groups { {
+    { "Vienna", "city", 17, 45448, 71496 },
+    { "Salzburg", "city", 16, 22832, 35144 },
+    { "Graz", "city", 16, 23030, 35578 },
+    { "Neusiedler See", "lake", 13, 2852, 4476 },
+    { "Attersee", "lake", 14, 5702, 8808 },
+    { "Wörthersee", "lake", 15, 11574, 17670 },
+    { "Grossglockner", "mountain", 16, 23030, 35078 },
+    { "Dachstein", "mountain", 15, 11460, 17622 },
+    { "Arlberg", "mountain", 14, 5752, 8656 },
+    { "Ötztal", "mountain", 16, 23084, 34746 },
+    { "Wienerwald", "forest", 14, 5684, 8926 },
+    { "Kalkalpen", "forest", 15, 11418, 17692 },
+    { "Bregenzerwald", "forest", 16, 22956, 34570 },
+    { "Marchfeld", "fields", 15, 11358, 17904 },
+    { "Burgenland", "fields", 16, 22910, 35770 },
+    { "Weinviertel", "fields", 14, 5656, 8938 },
+} };
+
+QString tile_url(const TileGroup& group, int x_offset, int y_offset)
+{
+    return QStringLiteral("https://gataki.cg.tuwien.ac.at/raw/basemap/tiles/%1/%2/%3.jpeg")
+        .arg(group.zoom)
+        .arg(group.y + y_offset)
+        .arg(group.x + x_offset);
+}
+
+QJsonArray dataset_json()
+{
+    QJsonArray result;
+    for (const auto& group : tile_groups) {
+        QJsonArray urls;
+        for (int y = 0; y < 2; ++y) {
+            for (int x = 0; x < 2; ++x)
+                urls.append(tile_url(group, x, y));
+        }
+        result.append(QJsonObject {
+            { QStringLiteral("name"), QString::fromUtf8(group.name) },
+            { QStringLiteral("category"), QString::fromLatin1(group.category) },
+            { QStringLiteral("zoom"), group.zoom },
+            { QStringLiteral("top_left_x"), group.x },
+            { QStringLiteral("top_left_y"), group.y },
+            { QStringLiteral("urls"), urls },
+        });
+    }
+    return result;
+}
 
 struct Statistics {
     double median = 0.0;
@@ -113,6 +175,7 @@ struct PendingFenceDiagnostic {
     std::unique_ptr<gl_engine::Framebuffer> probe_framebuffer;
     std::unique_ptr<gl_engine::ShaderProgram> probe_shader;
     gl_engine::helpers::ScreenQuadGeometry probe_geometry;
+    std::vector<Raster> source_pool;
     std::vector<Raster> sources;
     std::vector<unsigned> layers;
     gl_engine::TextureCompressor::Settings settings;
@@ -157,7 +220,7 @@ double srgb_to_linear(uint8_t value)
     return std::pow((normalised + 0.055) / 1.055, 2.4);
 }
 
-double linear_psnr(const QImage& reconstructed, const Raster& source)
+double linear_squared_error(const QImage& reconstructed, const Raster& source)
 {
     double squared_error = 0.0;
     for (int y = 0; y < reconstructed.height(); ++y) {
@@ -174,11 +237,23 @@ double linear_psnr(const QImage& reconstructed, const Raster& source)
             }
         }
     }
-    const auto mse = squared_error / double(reconstructed.width() * reconstructed.height() * 3);
+    return squared_error;
+}
+
+double linear_psnr(std::span<const QImage> reconstructed, std::span<const Raster> sources)
+{
+    Q_ASSERT(reconstructed.size() == sources.size());
+    double squared_error = 0.0;
+    uint64_t channel_count = 0;
+    for (size_t i = 0; i < sources.size(); ++i) {
+        squared_error += linear_squared_error(reconstructed[i], sources[i]);
+        channel_count += uint64_t(reconstructed[i].width()) * uint64_t(reconstructed[i].height()) * 3;
+    }
+    const auto mse = squared_error / double(channel_count);
     return mse == 0.0 ? std::numeric_limits<double>::infinity() : 10.0 * std::log10(1.0 / mse);
 }
 
-QImage reconstruct(gl_engine::Texture& texture, unsigned resolution)
+QImage reconstruct(gl_engine::Texture& texture, unsigned resolution, unsigned layer)
 {
     gl_engine::Framebuffer framebuffer(
         gl_engine::Framebuffer::DepthFormat::None, { gl_engine::Framebuffer::ColourFormat::RGBA8 }, { resolution, resolution });
@@ -192,19 +267,39 @@ QImage reconstruct(gl_engine::Texture& texture, unsigned resolution)
         })",
         R"(
         uniform lowp sampler2DArray texture_sampler;
+        uniform highp float texture_layer;
         in highp vec2 texcoords;
         out lowp vec4 out_color;
         void main() {
-            out_color = textureLod(texture_sampler, vec3(texcoords.x, 1.0 - texcoords.y, 0.0), 0.0);
+            out_color = textureLod(texture_sampler, vec3(texcoords.x, 1.0 - texcoords.y, texture_layer), 0.0);
         })",
         gl_engine::ShaderCodeSource::PLAINTEXT);
     shader.bind();
     texture.bind(0);
     shader.set_uniform("texture_sampler", 0);
+    shader.set_uniform("texture_layer", float(layer));
     gl_engine::helpers::create_screen_quad_geometry().draw();
     auto result = framebuffer.read_colour_attachment(0);
     gl_engine::Framebuffer::unbind();
     return result;
+}
+
+QString preview_data_url(std::span<const QImage> images)
+{
+    constexpr int columns = 4;
+    constexpr int tile_size = 512;
+    QImage preview(columns * tile_size, columns * tile_size, QImage::Format_RGBA8888);
+    preview.fill(Qt::black);
+    QPainter painter(&preview);
+    for (size_t i = 0; i < images.size(); ++i)
+        painter.drawImage(QPoint(int(i % columns) * tile_size, int(i / columns) * tile_size), images[i]);
+    painter.end();
+
+    QByteArray png;
+    QBuffer buffer(&png);
+    buffer.open(QIODevice::WriteOnly);
+    preview.save(&buffer, "PNG");
+    return QStringLiteral("data:image/png;base64,") + QString::fromLatin1(png.toBase64());
 }
 
 std::vector<nucleus::utils::MipmappedColourTexture> cpu_compress(
@@ -288,9 +383,9 @@ public:
             return;
         m_seen_serial = benchmark_item->m_request_serial;
         m_effort = benchmark_item->m_effort;
-        m_batch_size = benchmark_item->m_batch_size;
-        m_iterations = benchmark_item->m_iterations;
         m_mipmaps = benchmark_item->m_mipmaps;
+        m_source_images = benchmark_item->m_source_images;
+        m_preview_source.clear();
         m_pending = true;
     }
 
@@ -312,9 +407,10 @@ public:
         if (completed) {
             QPointer<BenchmarkItem> item = m_item;
             const auto [text, json] = std::move(*completed);
-            QMetaObject::invokeMethod(m_item, [item, text, json]() {
+            const auto preview_source = m_preview_source;
+            QMetaObject::invokeMethod(m_item, [item, text, json, preview_source]() {
                 if (item)
-                    item->publishResults(text, json);
+                    item->publishResults(text, json, preview_source);
             });
         } else {
             request_another_frame();
@@ -341,6 +437,10 @@ private:
 
     void begin_fence_sample(PendingFenceDiagnostic& diagnostic)
     {
+        constexpr size_t batch_size = 4;
+        const auto group_offset = size_t(diagnostic.iteration % 4) * batch_size;
+        diagnostic.sources.assign(
+            diagnostic.source_pool.begin() + ptrdiff_t(group_offset), diagnostic.source_pool.begin() + ptrdiff_t(group_offset + batch_size));
         diagnostic.last_source_markers.clear();
         diagnostic.last_source_markers.reserve(diagnostic.sources.size());
         for (size_t layer = 0; layer < diagnostic.sources.size(); ++layer) {
@@ -597,15 +697,29 @@ private:
     std::pair<QString, QString> run()
     {
         constexpr unsigned resolution = 512;
-        QImage input(QStringLiteral(":/benchmark/merged.jpg"));
-        if (input.isNull())
-            return { QStringLiteral("Unable to load the benchmark image."), QStringLiteral("{}") };
-        input = input.convertToFormat(QImage::Format_RGBA8888).scaled(
-            int(resolution), int(resolution), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-        const auto source = nucleus::tile::conversion::to_rgba8raster(input);
-        std::vector<Raster> sources(size_t(m_batch_size), source);
-        std::vector<unsigned> layers(size_t(m_batch_size), 0u);
+        constexpr int batch_size = 4;
+        constexpr int batches_per_round = 4;
+        constexpr int measurement_rounds = 3;
+        constexpr int sample_count = batches_per_round * measurement_rounds;
+        if (m_source_images.size() < tile_groups.size()) {
+            const QJsonObject error {
+                { QStringLiteral("supported"), false },
+                { QStringLiteral("error"), QStringLiteral("Benchmark imagery is incomplete") },
+            };
+            return { QStringLiteral("Unable to load the complete benchmark dataset."),
+                QString::fromUtf8(QJsonDocument(error).toJson(QJsonDocument::Indented)) };
+        }
+        std::vector<Raster> all_sources;
+        all_sources.reserve(tile_groups.size());
+        for (const auto& image : m_source_images)
+            all_sources.push_back(nucleus::tile::conversion::to_rgba8raster(image));
+        std::vector<unsigned> layers(size_t(batch_size), 0u);
         std::iota(layers.begin(), layers.end(), 0u);
+        std::vector<unsigned> quality_layers(tile_groups.size(), 0u);
+        std::iota(quality_layers.begin(), quality_layers.end(), 0u);
+        const auto sources_for_group = [&](int group) {
+            return std::span<const Raster>(all_sources).subspan(size_t(group * batch_size), size_t(batch_size));
+        };
 
         if (!gl_engine::TextureCompressor::is_supported()) {
             QJsonObject root {
@@ -623,31 +737,58 @@ private:
         const auto algorithm = gl_engine::Texture::compression_algorithm();
         const auto backend_name = QStringLiteral("Fragment shader + PBO");
         const auto filter = m_mipmaps ? gl_engine::Texture::Filter::MipMapLinear : gl_engine::Texture::Filter::Linear;
-        gl_engine::Texture cpu_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
-        cpu_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
-        cpu_destination.allocate_array(resolution, resolution, unsigned(m_batch_size));
-        auto gpu_destination = std::make_unique<gl_engine::Texture>(
-            gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
-        gpu_destination->setParams(filter, gl_engine::Texture::Filter::Linear);
-        gpu_destination->allocate_array(resolution, resolution, unsigned(m_batch_size));
-        auto gpu_compressor = std::make_unique<gl_engine::TextureCompressor>(resolution, resolution, unsigned(m_batch_size));
-        m_gpu_timer = std::make_unique<gl_engine::TextureCompressor::GpuTimer>();
-
-        auto upload_cpu = [&](const std::vector<nucleus::utils::MipmappedColourTexture>& compressed) {
-            const auto start = Clock::now();
-            for (size_t layer = 0; layer < compressed.size(); ++layer)
-                cpu_destination.upload(compressed[layer], unsigned(layer));
-            QOpenGLContext::currentContext()->extraFunctions()->glFinish();
-            return elapsed_ms(start);
-        };
-
-        constexpr int warmup_iterations = 3;
         const gl_engine::TextureCompressor::Settings gpu_settings {
             .algorithm = algorithm,
             .effort = unsigned(m_effort),
             .generate_mipmaps = m_mipmaps,
             .timing_mode = gl_engine::TextureCompressor::TimingMode::EndToEnd,
         };
+        auto upload_cpu = [&](gl_engine::Texture& destination, const std::vector<nucleus::utils::MipmappedColourTexture>& compressed) {
+            const auto start = Clock::now();
+            for (size_t layer = 0; layer < compressed.size(); ++layer)
+                destination.upload(compressed[layer], unsigned(layer));
+            QOpenGLContext::currentContext()->extraFunctions()->glFinish();
+            return elapsed_ms(start);
+        };
+
+        // Quality is evaluated first with one untimed compression of all 16 images.
+        double cpu_psnr = 0.0;
+        double gpu_psnr = 0.0;
+        {
+            gl_engine::Texture cpu_quality_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
+            cpu_quality_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
+            cpu_quality_destination.allocate_array(resolution, resolution, unsigned(tile_groups.size()));
+            auto cpu_quality = cpu_compress(all_sources, algorithm, m_mipmaps);
+            static_cast<void>(upload_cpu(cpu_quality_destination, cpu_quality));
+
+            gl_engine::Texture gpu_quality_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
+            gpu_quality_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
+            gpu_quality_destination.allocate_array(resolution, resolution, unsigned(tile_groups.size()));
+            gl_engine::TextureCompressor gpu_quality_compressor(resolution, resolution, unsigned(tile_groups.size()));
+            static_cast<void>(gpu_quality_compressor.compress(all_sources, gpu_quality_destination, quality_layers, gpu_settings));
+
+            std::vector<QImage> cpu_reconstructed;
+            std::vector<QImage> gpu_reconstructed;
+            cpu_reconstructed.reserve(all_sources.size());
+            gpu_reconstructed.reserve(all_sources.size());
+            for (unsigned layer = 0; layer < all_sources.size(); ++layer) {
+                cpu_reconstructed.push_back(reconstruct(cpu_quality_destination, resolution, layer));
+                gpu_reconstructed.push_back(reconstruct(gpu_quality_destination, resolution, layer));
+            }
+            cpu_psnr = linear_psnr(cpu_reconstructed, all_sources);
+            gpu_psnr = linear_psnr(gpu_reconstructed, all_sources);
+            m_preview_source = preview_data_url(gpu_reconstructed);
+        }
+
+        gl_engine::Texture cpu_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
+        cpu_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
+        cpu_destination.allocate_array(resolution, resolution, batch_size);
+        auto gpu_destination = std::make_unique<gl_engine::Texture>(
+            gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
+        gpu_destination->setParams(filter, gl_engine::Texture::Filter::Linear);
+        gpu_destination->allocate_array(resolution, resolution, batch_size);
+        auto gpu_compressor = std::make_unique<gl_engine::TextureCompressor>(resolution, resolution, batch_size);
+        m_gpu_timer = std::make_unique<gl_engine::TextureCompressor::GpuTimer>();
 
         std::vector<double> cpu_compression_times;
         std::vector<double> cpu_upload_times;
@@ -661,35 +802,38 @@ private:
         WallTimingSamples gpu_compressed_upload_times;
         std::vector<double> gpu_total_times;
         std::vector<uint64_t> gpu_timing_tickets;
-        cpu_compression_times.reserve(size_t(m_iterations));
-        cpu_upload_times.reserve(size_t(m_iterations));
-        cpu_total_times.reserve(size_t(m_iterations));
-        gpu_total_times.reserve(size_t(m_iterations));
+        cpu_compression_times.reserve(sample_count);
+        cpu_upload_times.reserve(sample_count);
+        cpu_total_times.reserve(sample_count);
+        gpu_total_times.reserve(sample_count);
 
         // Keep CPU and GPU phases separate: mobile CPU frequency and thermal state are shared
         // with the GPU, so interleaving them makes the CPU result workload-dependent.
-        for (int iteration = 0; iteration < warmup_iterations; ++iteration) {
-            auto compressed = cpu_compress(sources, algorithm, m_mipmaps);
-            static_cast<void>(upload_cpu(compressed));
+        // Each backend warms up once on all four distinct batches.
+        for (int group = 0; group < batches_per_round; ++group) {
+            auto compressed = cpu_compress(sources_for_group(group), algorithm, m_mipmaps);
+            static_cast<void>(upload_cpu(cpu_destination, compressed));
         }
-        for (int iteration = 0; iteration < m_iterations; ++iteration) {
-            const auto cpu_start = Clock::now();
-            auto compressed = cpu_compress(sources, algorithm, m_mipmaps);
-            const auto cpu_compression_time = elapsed_ms(cpu_start);
-            const auto cpu_upload_time = upload_cpu(compressed);
-            cpu_compression_times.push_back(cpu_compression_time);
-            cpu_upload_times.push_back(cpu_upload_time);
-            cpu_total_times.push_back(elapsed_ms(cpu_start));
+        for (int group = 0; group < batches_per_round; ++group)
+            static_cast<void>(gpu_compressor->compress(sources_for_group(group), *gpu_destination, layers, gpu_settings));
+
+        for (int round = 0; round < measurement_rounds; ++round) {
+            for (int group = 0; group < batches_per_round; ++group) {
+                const auto cpu_start = Clock::now();
+                auto compressed = cpu_compress(sources_for_group(group), algorithm, m_mipmaps);
+                const auto cpu_compression_time = elapsed_ms(cpu_start);
+                const auto cpu_upload_time = upload_cpu(cpu_destination, compressed);
+                cpu_compression_times.push_back(cpu_compression_time);
+                cpu_upload_times.push_back(cpu_upload_time);
+                cpu_total_times.push_back(elapsed_ms(cpu_start));
+            }
         }
 
-        for (int iteration = 0; iteration < warmup_iterations; ++iteration)
-            static_cast<void>(gpu_compressor->compress(sources, *gpu_destination, layers, gpu_settings));
-        for (int iteration = 0; iteration < m_iterations; ++iteration) {
-            const auto gpu = gpu_compressor->compress(sources,
-                *gpu_destination,
-                layers,
-                gpu_settings);
-            gpu_total_times.push_back(gpu.timings.total_ms);
+        for (int round = 0; round < measurement_rounds; ++round) {
+            for (int group = 0; group < batches_per_round; ++group) {
+                const auto gpu = gpu_compressor->compress(sources_for_group(group), *gpu_destination, layers, gpu_settings);
+                gpu_total_times.push_back(gpu.timings.total_ms);
+            }
         }
 
         // Stage timings are collected in a separate profiling phase. Each stage is completed
@@ -698,17 +842,19 @@ private:
         auto stage_settings = gpu_settings;
         stage_settings.timing_mode = gl_engine::TextureCompressor::TimingMode::IndividualStages;
         stage_settings.gpu_timer = m_gpu_timer.get();
-        for (int iteration = 0; iteration < m_iterations; ++iteration) {
-            const auto gpu = gpu_compressor->compress(sources, *gpu_destination, layers, stage_settings);
-            gpu_upload_times.append(gpu.timings.scratch_upload);
-            gpu_mipmap_times.append(gpu.timings.mipmap_generation);
-            gpu_compression_pass_times.append(gpu.timings.compression_pass);
-            gpu_packing_pass_times.append(gpu.timings.packing_pass);
-            gpu_encoding_times.append(gpu.timings.encoding);
-            gpu_output_transfer_times.append(gpu.timings.output_transfer);
-            gpu_compressed_upload_times.append(gpu.timings.compressed_upload);
-            if (gpu.gpu_timing_ticket)
-                gpu_timing_tickets.push_back(gpu.gpu_timing_ticket);
+        for (int round = 0; round < measurement_rounds; ++round) {
+            for (int group = 0; group < batches_per_round; ++group) {
+                const auto gpu = gpu_compressor->compress(sources_for_group(group), *gpu_destination, layers, stage_settings);
+                gpu_upload_times.append(gpu.timings.scratch_upload);
+                gpu_mipmap_times.append(gpu.timings.mipmap_generation);
+                gpu_compression_pass_times.append(gpu.timings.compression_pass);
+                gpu_packing_pass_times.append(gpu.timings.packing_pass);
+                gpu_encoding_times.append(gpu.timings.encoding);
+                gpu_output_transfer_times.append(gpu.timings.output_transfer);
+                gpu_compressed_upload_times.append(gpu.timings.compressed_upload);
+                if (gpu.gpu_timing_ticket)
+                    gpu_timing_tickets.push_back(gpu.gpu_timing_ticket);
+            }
         }
 
         const auto cpu_compression = statistics(cpu_compression_times);
@@ -722,8 +868,6 @@ private:
         const auto gpu_output_transfer = statistics(gpu_output_transfer_times.total);
         const auto gpu_compressed_upload = statistics(gpu_compressed_upload_times.total);
         const auto gpu_total = statistics(gpu_total_times);
-        const auto cpu_psnr = linear_psnr(reconstruct(cpu_destination, resolution), source);
-        const auto gpu_psnr = linear_psnr(reconstruct(*gpu_destination, resolution), source);
         const auto algorithm_name = algorithm == nucleus::utils::ColourTexture::Format::DXT1 ? QStringLiteral("DXT1 / BC1") : QStringLiteral("ETC1 in ETC2");
 
         QJsonObject root {
@@ -735,12 +879,17 @@ private:
             { QStringLiteral("gpu_backend"), backend_name },
             { QStringLiteral("timing_method"), QStringLiteral("wall time; one final glFinish per end-to-end sample") },
             { QStringLiteral("resolution"), int(resolution) },
-            { QStringLiteral("batch_size"), m_batch_size },
-            { QStringLiteral("iterations"), m_iterations },
-            { QStringLiteral("warmup_iterations"), warmup_iterations },
-            { QStringLiteral("gpu_stage_profile_iterations"), m_iterations },
+            { QStringLiteral("batch_size"), batch_size },
+            { QStringLiteral("measurement_rounds"), measurement_rounds },
+            { QStringLiteral("batches_per_round"), batches_per_round },
+            { QStringLiteral("measurement_samples"), sample_count },
+            { QStringLiteral("warmup_rounds"), 1 },
+            { QStringLiteral("gpu_stage_profile_samples"), sample_count },
             { QStringLiteral("effort"), m_effort },
             { QStringLiteral("mipmaps"), m_mipmaps },
+            { QStringLiteral("dataset"), dataset_json() },
+            { QStringLiteral("cpu_psnr_db_all_16_images"), cpu_psnr },
+            { QStringLiteral("gpu_psnr_db_all_16_images"), gpu_psnr },
             { QStringLiteral("cpu_compression"), to_json(cpu_compression) },
             { QStringLiteral("cpu_compressed_upload"), to_json(cpu_upload) },
             { QStringLiteral("cpu_end_to_end"), to_json(cpu_total) },
@@ -752,12 +901,10 @@ private:
             { QStringLiteral("gpu_output_transfer"), to_json(gpu_output_transfer) },
             { QStringLiteral("gpu_compressed_upload"), to_json(gpu_compressed_upload) },
             { QStringLiteral("gpu_end_to_end"), to_json(gpu_total) },
-            { QStringLiteral("cpu_psnr_db"), cpu_psnr },
-            { QStringLiteral("gpu_psnr_db"), gpu_psnr },
-            { QStringLiteral("cpu_tiles_per_second"), 1000.0 * m_batch_size / cpu_total.median },
-            { QStringLiteral("gpu_tiles_per_second"), 1000.0 * m_batch_size / gpu_total.median },
+            { QStringLiteral("cpu_tiles_per_second"), 1000.0 * batch_size / cpu_total.median },
+            { QStringLiteral("gpu_tiles_per_second"), 1000.0 * batch_size / gpu_total.median },
             { QStringLiteral("phase_order"),
-                QStringLiteral("CPU warmup, CPU measurement, GPU warmup, GPU end-to-end measurement, GPU stage profiling, asynchronous fence verification") },
+                QStringLiteral("16-image PSNR and preview, one CPU and GPU warmup round over four batches, three CPU and GPU measurement rounds over four batches, GPU stage profiling, asynchronous fence verification") },
             { QStringLiteral("gpu_stage_timing_method"), QStringLiteral("separate profiling pass; each stage glFinish-synchronised") },
             { QStringLiteral("gpu_stage_wall_profile"),
                 QJsonObject {
@@ -798,15 +945,19 @@ private:
             return QStringLiteral("%1  median %2 ms   p95 %3 ms").arg(label, -26).arg(value.median, 8, 'f', 3).arg(value.p95, 8, 'f', 3);
         };
         QStringList summary {
-            QStringLiteral("%1 — %2 × %3, batch %4, effort %5, mipmaps %6")
+            QStringLiteral("%1 — %2 × %3, batch %4, 12 samples, effort %5, mipmaps %6")
                 .arg(algorithm_name)
                 .arg(resolution)
                 .arg(resolution)
-                .arg(m_batch_size)
+                .arg(batch_size)
                 .arg(m_effort)
                 .arg(m_mipmaps ? QStringLiteral("on") : QStringLiteral("off")),
             backend_name,
             gl_string(GL_RENDERER),
+            QStringLiteral("Quality first: one untimed 16-image pass"),
+            QStringLiteral("CPU PSNR (all 16 images)  %1 dB").arg(cpu_psnr, 0, 'f', 2),
+            QStringLiteral("GPU PSNR (all 16 images)  %1 dB").arg(gpu_psnr, 0, 'f', 2),
+            QStringLiteral("Timing: one warmup round, then three rounds × four distinct batches"),
             QStringLiteral("Timing: one final glFinish per end-to-end sample"),
             QString(),
             line(QStringLiteral("CPU compression"), cpu_compression),
@@ -822,10 +973,8 @@ private:
             line(QStringLiteral("GPU compressed upload"), gpu_compressed_upload),
             line(QStringLiteral("GPU end-to-end"), gpu_total),
             QString(),
-            QStringLiteral("CPU completed throughput  %1 tiles/s").arg(1000.0 * m_batch_size / cpu_total.median, 0, 'f', 1),
-            QStringLiteral("GPU completed throughput  %1 tiles/s").arg(1000.0 * m_batch_size / gpu_total.median, 0, 'f', 1),
-            QStringLiteral("CPU PSNR        %1 dB").arg(cpu_psnr, 0, 'f', 2),
-            QStringLiteral("GPU PSNR        %1 dB").arg(gpu_psnr, 0, 'f', 2),
+            QStringLiteral("CPU completed throughput  %1 tiles/s").arg(1000.0 * batch_size / cpu_total.median, 0, 'f', 1),
+            QStringLiteral("GPU completed throughput  %1 tiles/s").arg(1000.0 * batch_size / gpu_total.median, 0, 'f', 1),
         };
         if (!m_gpu_timer->is_supported()) {
             root.insert(QStringLiteral("gpu_timer_query"),
@@ -839,18 +988,18 @@ private:
             .root = std::move(root),
             .summary = std::move(summary),
             .tickets = std::move(gpu_timing_tickets),
-            .query_results = std::vector<std::optional<gl_engine::TextureCompressor::GpuTimings>>(size_t(m_iterations)),
-            .query_finished = std::vector<bool>(size_t(m_iterations), false),
+            .query_results = std::vector<std::optional<gl_engine::TextureCompressor::GpuTimings>>(sample_count),
+            .query_finished = std::vector<bool>(sample_count, false),
         };
         if (m_gpu_timer->is_supported())
-            Q_ASSERT(m_pending_gpu_report->tickets.size() == size_t(m_iterations));
+            Q_ASSERT(m_pending_gpu_report->tickets.size() == sample_count);
 
         PendingFenceDiagnostic fence_diagnostic;
         fence_diagnostic.compressor = std::move(gpu_compressor);
         fence_diagnostic.destination = std::move(gpu_destination);
         fence_diagnostic.probe_framebuffer = std::make_unique<gl_engine::Framebuffer>(gl_engine::Framebuffer::DepthFormat::None,
             std::vector<gl_engine::Framebuffer::ColourFormat> { gl_engine::Framebuffer::ColourFormat::RGBA8 },
-            glm::uvec2(unsigned(m_batch_size), 1u));
+            glm::uvec2(batch_size, 1u));
         fence_diagnostic.probe_shader = std::make_unique<gl_engine::ShaderProgram>(R"(
             void main() {
                 highp vec2 vertices[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
@@ -865,11 +1014,11 @@ private:
             })",
             gl_engine::ShaderCodeSource::PLAINTEXT);
         fence_diagnostic.probe_geometry = gl_engine::helpers::create_screen_quad_geometry();
-        fence_diagnostic.sources = std::move(sources);
+        fence_diagnostic.source_pool = std::move(all_sources);
         fence_diagnostic.layers = std::move(layers);
         fence_diagnostic.settings = gpu_settings;
         fence_diagnostic.settings.timing_mode = gl_engine::TextureCompressor::TimingMode::SubmissionOnly;
-        fence_diagnostic.iteration_count = m_iterations;
+        fence_diagnostic.iteration_count = sample_count;
         m_pending_gpu_report->fence_diagnostic.emplace(std::move(fence_diagnostic));
         begin_fence_sample(*m_pending_gpu_report->fence_diagnostic);
         return {};
@@ -879,17 +1028,19 @@ private:
     QQuickWindow* m_window = nullptr;
     unsigned m_seen_serial = 0;
     int m_effort = 4;
-    int m_batch_size = 4;
-    int m_iterations = 10;
     bool m_mipmaps = true;
     bool m_pending = false;
+    std::vector<QImage> m_source_images;
+    QString m_preview_source;
     std::unique_ptr<gl_engine::TextureCompressor::GpuTimer> m_gpu_timer;
     std::optional<PendingGpuReport> m_pending_gpu_report;
 };
 
 BenchmarkItem::BenchmarkItem(QQuickItem* parent)
     : QQuickFramebufferObject(parent)
+    , m_network_manager(new QNetworkAccessManager(this))
 {
+    downloadBenchmarkData();
 }
 
 QQuickFramebufferObject::Renderer* BenchmarkItem::createRenderer() const { return new BenchmarkRenderer; }
@@ -904,27 +1055,6 @@ void BenchmarkItem::setEffort(int value)
     emit effortChanged();
 }
 
-int BenchmarkItem::batchSize() const { return m_batch_size; }
-void BenchmarkItem::setBatchSize(int value)
-{
-    if (value != 1 && value != 4 && value != 16)
-        return;
-    if (m_batch_size == value)
-        return;
-    m_batch_size = value;
-    emit batchSizeChanged();
-}
-
-int BenchmarkItem::iterations() const { return m_iterations; }
-void BenchmarkItem::setIterations(int value)
-{
-    value = std::clamp(value, 1, 50);
-    if (m_iterations == value)
-        return;
-    m_iterations = value;
-    emit iterationsChanged();
-}
-
 bool BenchmarkItem::mipmaps() const { return m_mipmaps; }
 void BenchmarkItem::setMipmaps(bool value)
 {
@@ -934,17 +1064,92 @@ void BenchmarkItem::setMipmaps(bool value)
     emit mipmapsChanged();
 }
 
+bool BenchmarkItem::dataReady() const { return m_data_ready; }
+QString BenchmarkItem::dataStatus() const { return m_data_status; }
 bool BenchmarkItem::running() const { return m_running; }
 QString BenchmarkItem::resultText() const { return m_result_text; }
 QString BenchmarkItem::resultJson() const { return m_result_json; }
+QString BenchmarkItem::previewSource() const { return m_preview_source; }
+
+void BenchmarkItem::downloadBenchmarkData()
+{
+    m_downloaded_tiles.resize(tile_groups.size() * 4);
+    m_downloads_remaining = int(m_downloaded_tiles.size());
+    for (size_t group_index = 0; group_index < tile_groups.size(); ++group_index) {
+        for (int y = 0; y < 2; ++y) {
+            for (int x = 0; x < 2; ++x) {
+                const auto tile_index = group_index * 4 + size_t(y * 2 + x);
+                const auto url = tile_url(tile_groups[group_index], x, y);
+                auto* reply = m_network_manager->get(QNetworkRequest(QUrl(url)));
+                connect(reply, &QNetworkReply::finished, this, [this, reply, tile_index, url]() {
+                    if (reply->error() == QNetworkReply::NoError) {
+                        QImage image;
+                        image.loadFromData(reply->readAll(), "JPEG");
+                        if (!image.isNull() && image.size() == QSize(256, 256))
+                            m_downloaded_tiles[tile_index] = image.convertToFormat(QImage::Format_RGBA8888);
+                    }
+                    if (m_downloaded_tiles[tile_index].isNull() && !m_data_status.startsWith(QStringLiteral("Unable"))) {
+                        m_data_status = QStringLiteral("Unable to download benchmark tile: %1").arg(url);
+                        emit dataStatusChanged();
+                    }
+                    reply->deleteLater();
+                    --m_downloads_remaining;
+                    if (m_downloads_remaining > 0) {
+                        if (!m_data_status.startsWith(QStringLiteral("Unable"))) {
+                            m_data_status = QStringLiteral("Downloading benchmark imagery… %1/%2")
+                                                .arg(int(m_downloaded_tiles.size()) - m_downloads_remaining)
+                                                .arg(m_downloaded_tiles.size());
+                            emit dataStatusChanged();
+                        }
+                        return;
+                    }
+                    if (std::ranges::any_of(m_downloaded_tiles, [](const QImage& image) { return image.isNull(); })) {
+                        m_result_text = m_data_status;
+                        emit resultTextChanged();
+                        return;
+                    }
+                    stitchBenchmarkData();
+                });
+            }
+        }
+    }
+}
+
+void BenchmarkItem::stitchBenchmarkData()
+{
+    m_source_images.clear();
+    m_source_images.reserve(tile_groups.size());
+    for (size_t group_index = 0; group_index < tile_groups.size(); ++group_index) {
+        QImage stitched(512, 512, QImage::Format_RGBA8888);
+        QPainter painter(&stitched);
+        for (int y = 0; y < 2; ++y) {
+            for (int x = 0; x < 2; ++x)
+                painter.drawImage(QPoint(x * 256, y * 256), m_downloaded_tiles[group_index * 4 + size_t(y * 2 + x)]);
+        }
+        painter.end();
+        m_source_images.push_back(std::move(stitched));
+    }
+    m_downloaded_tiles.clear();
+    m_data_ready = true;
+    m_data_status = QStringLiteral("16 benchmark images ready.");
+    emit dataReadyChanged();
+    emit dataStatusChanged();
+    runBenchmark();
+}
 
 void BenchmarkItem::runBenchmark()
 {
-    if (m_running)
+    if (m_running || !m_data_ready)
         return;
     m_running = true;
+    m_result_text = QStringLiteral("Computing PSNR, then measuring batch size 4…");
+    m_result_json.clear();
+    m_preview_source.clear();
     ++m_request_serial;
     emit runningChanged();
+    emit resultTextChanged();
+    emit resultJsonChanged();
+    emit previewSourceChanged();
     update();
 }
 
@@ -954,12 +1159,14 @@ void BenchmarkItem::copyResultJson()
         QGuiApplication::clipboard()->setText(m_result_json);
 }
 
-void BenchmarkItem::publishResults(const QString& text, const QString& json)
+void BenchmarkItem::publishResults(const QString& text, const QString& json, const QString& preview_source)
 {
     m_result_text = text;
     m_result_json = json;
+    m_preview_source = preview_source;
     m_running = false;
     emit resultTextChanged();
     emit resultJsonChanged();
+    emit previewSourceChanged();
     emit runningChanged();
 }
