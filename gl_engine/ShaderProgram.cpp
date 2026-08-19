@@ -180,13 +180,11 @@ QString ShaderProgram::read_file_content_local(const QString& name) {
 ShaderProgram::ShaderProgram(QString vertex_shader,
     QString fragment_shader,
     ShaderCodeSource code_source,
-    const std::vector<QString>& defines,
-    const std::vector<QByteArray>& transform_feedback_varyings)
+    const std::vector<QString>& defines)
     : m_vertex_shader(vertex_shader)
     , m_fragment_shader(fragment_shader)
     , m_code_source(code_source)
     , m_defines(defines)
-    , m_transform_feedback_varyings(transform_feedback_varyings)
 {
     reload();
     Q_ASSERT(m_q_shader_program);
@@ -334,14 +332,6 @@ void ShaderProgram::reload()
     } else if (!program->addShaderFromSourceCode(QOpenGLShader::Fragment, fragmentCode)) {
         outputMeaningfullErrors(program->log(), fragmentCode, m_fragment_shader);
     } else {
-        if (!m_transform_feedback_varyings.empty()) {
-            std::vector<const GLchar*> varyings;
-            varyings.reserve(m_transform_feedback_varyings.size());
-            for (const auto& varying : m_transform_feedback_varyings)
-                varyings.push_back(varying.constData());
-            QOpenGLContext::currentContext()->extraFunctions()->glTransformFeedbackVaryings(
-                program->programId(), GLsizei(varyings.size()), varyings.data(), GL_INTERLEAVED_ATTRIBS);
-        }
         if (!program->link()) {
 #ifdef _MSC_VER
             // when using msvc in github ci qDebug/Critical don't print when an assert fails

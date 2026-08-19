@@ -103,14 +103,9 @@ ApplicationWindow {
                             text: qsTr("GPU encoder")
                         }
 
-                        ComboBox {
+                        Label {
                             Layout.preferredWidth: 220
-                            model: benchmark.transformFeedbackSupported
-                                ? [qsTr("Fragment shader + PBO"), qsTr("Transform feedback")]
-                                : [qsTr("Fragment shader + PBO")]
-                            currentIndex: benchmark.backend
-                            enabled: !benchmark.running && benchmark.transformFeedbackSupported
-                            onActivated: benchmark.backend = currentIndex
+                            text: qsTr("Fragment shader + PBO")
                         }
                     }
 

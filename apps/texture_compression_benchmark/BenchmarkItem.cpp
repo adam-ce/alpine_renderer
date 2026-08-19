@@ -291,7 +291,6 @@ public:
         m_batch_size = benchmark_item->m_batch_size;
         m_iterations = benchmark_item->m_iterations;
         m_mipmaps = benchmark_item->m_mipmaps;
-        m_backend = benchmark_item->m_backend;
         m_pending = true;
     }
 
@@ -622,11 +621,7 @@ private:
         }
 
         const auto algorithm = gl_engine::Texture::compression_algorithm();
-        const auto backend = m_backend == 0 ? gl_engine::TextureCompressor::Backend::FragmentShader
-                                            : gl_engine::TextureCompressor::Backend::TransformFeedback;
-        const auto backend_name = backend == gl_engine::TextureCompressor::Backend::FragmentShader
-            ? QStringLiteral("Fragment shader + PBO")
-            : QStringLiteral("Transform feedback");
+        const auto backend_name = QStringLiteral("Fragment shader + PBO");
         const auto filter = m_mipmaps ? gl_engine::Texture::Filter::MipMapLinear : gl_engine::Texture::Filter::Linear;
         gl_engine::Texture cpu_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
         cpu_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
@@ -651,7 +646,6 @@ private:
             .algorithm = algorithm,
             .effort = unsigned(m_effort),
             .generate_mipmaps = m_mipmaps,
-            .backend = backend,
             .timing_mode = gl_engine::TextureCompressor::TimingMode::EndToEnd,
         };
 
@@ -673,7 +667,7 @@ private:
         gpu_total_times.reserve(size_t(m_iterations));
 
         // Keep CPU and GPU phases separate: mobile CPU frequency and thermal state are shared
-        // with the GPU, so interleaving them makes the CPU result backend-dependent.
+        // with the GPU, so interleaving them makes the CPU result workload-dependent.
         for (int iteration = 0; iteration < warmup_iterations; ++iteration) {
             auto compressed = cpu_compress(sources, algorithm, m_mipmaps);
             static_cast<void>(upload_cpu(compressed));
@@ -888,7 +882,6 @@ private:
     int m_batch_size = 4;
     int m_iterations = 10;
     bool m_mipmaps = true;
-    int m_backend = 0;
     bool m_pending = false;
     std::unique_ptr<gl_engine::TextureCompressor::GpuTimer> m_gpu_timer;
     std::optional<PendingGpuReport> m_pending_gpu_report;
@@ -939,22 +932,6 @@ void BenchmarkItem::setMipmaps(bool value)
         return;
     m_mipmaps = value;
     emit mipmapsChanged();
-}
-
-int BenchmarkItem::backend() const { return m_backend; }
-void BenchmarkItem::setBackend(int value)
-{
-    if (value < 0 || value > 1 || (value == 1 && !transformFeedbackSupported()))
-        return;
-    if (m_backend == value)
-        return;
-    m_backend = value;
-    emit backendChanged();
-}
-
-bool BenchmarkItem::transformFeedbackSupported() const
-{
-    return gl_engine::TextureCompressor::is_backend_supported(gl_engine::TextureCompressor::Backend::TransformFeedback);
 }
 
 bool BenchmarkItem::running() const { return m_running; }

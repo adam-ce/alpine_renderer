@@ -688,12 +688,9 @@ struct gl_engine::TextureCompressor::Impl {
     GLuint encoded_texture = 0;
     GLuint encoded_buffer = 0;
     GLuint vertex_array = 0;
-    GLuint transform_feedback = 0;
     GLuint encoding_framebuffer = 0;
     GLuint packing_framebuffer = 0;
     GLuint packing_renderbuffer = 0;
-    std::unique_ptr<ShaderProgram> dxt1_transform_program;
-    std::unique_ptr<ShaderProgram> etc1_transform_program;
     std::unique_ptr<ShaderProgram> dxt1_fragment_program;
     std::unique_ptr<ShaderProgram> etc1_fragment_program;
     std::unique_ptr<ShaderProgram> packing_program;
@@ -773,40 +770,24 @@ struct gl_engine::TextureCompressor::Impl {
 
         dxt1_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
             "texture_compress.vert",
-            ShaderCodeSource::FILE,
-            std::vector<QString> { QStringLiteral("#define ALP_FRAGMENT_COMPRESSION") });
+            ShaderCodeSource::FILE);
         etc1_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
             "texture_compress.vert",
             ShaderCodeSource::FILE,
-            std::vector<QString> { QStringLiteral("#define ALP_FRAGMENT_COMPRESSION"), QStringLiteral("#define ALP_COMPRESS_ETC1") });
+            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1") });
         packing_program = std::make_unique<ShaderProgram>(
             "texture_compress_raster.vert", "texture_compress_pack.frag", ShaderCodeSource::FILE);
 
-#if !defined(__EMSCRIPTEN__)
-        f->glGenTransformFeedbacks(1, &transform_feedback);
-        const std::vector<QByteArray> varyings { QByteArrayLiteral("encoded_block") };
-        dxt1_transform_program = std::make_unique<ShaderProgram>(
-            "texture_compress.vert", "texture_compress.frag", ShaderCodeSource::FILE, std::vector<QString> {}, varyings);
-        etc1_transform_program = std::make_unique<ShaderProgram>("texture_compress.vert",
-            "texture_compress.frag",
-            ShaderCodeSource::FILE,
-            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1") },
-            varyings);
-#endif
     }
 
     ~Impl()
     {
-        dxt1_transform_program.reset();
-        etc1_transform_program.reset();
         dxt1_fragment_program.reset();
         etc1_fragment_program.reset();
         packing_program.reset();
         if (!QOpenGLContext::currentContext())
             return;
         auto* f = QOpenGLContext::currentContext()->extraFunctions();
-        if (transform_feedback)
-            f->glDeleteTransformFeedbacks(1, &transform_feedback);
         f->glDeleteFramebuffers(1, &encoding_framebuffer);
         f->glDeleteFramebuffers(1, &packing_framebuffer);
         f->glDeleteRenderbuffers(1, &packing_renderbuffer);
@@ -873,15 +854,6 @@ bool gl_engine::TextureCompressor::is_supported()
 #endif
 }
 
-bool gl_engine::TextureCompressor::is_backend_supported(Backend backend)
-{
-#if defined(__EMSCRIPTEN__)
-    return backend == Backend::FragmentShader;
-#else
-    return backend == Backend::FragmentShader || backend == Backend::TransformFeedback;
-#endif
-}
-
 gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std::span<const radix::Raster<glm::u8vec4>> textures,
     Texture& destination,
     std::span<const unsigned> destination_layers,
@@ -896,7 +868,6 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
     Q_ASSERT(destination.m_width == m->width && destination.m_height == m->height);
     Q_ASSERT(settings.algorithm == Texture::compression_algorithm());
     Q_ASSERT(settings.effort <= 10);
-    Q_ASSERT(is_backend_supported(settings.backend));
     for (size_t i = 0; i < textures.size(); ++i) {
         Q_ASSERT(unsigned(textures[i].width()) == m->width && unsigned(textures[i].height()) == m->height);
         Q_ASSERT(destination_layers[i] < destination.m_n_layers);
@@ -966,136 +937,97 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
     }
     result.encoded_bytes = total_encoded_size;
 
-    if (settings.backend == Backend::TransformFeedback) {
-        result.timings.compression_pass = measure_stage(GpuTimer::Stage::CompressionPass, [&]() {
-            auto* program = settings.algorithm == nucleus::utils::ColourTexture::Format::DXT1 ? m->dxt1_transform_program.get() : m->etc1_transform_program.get();
-            program->bind();
-            program->set_uniform("source_texture", 7);
-            program->set_uniform("effort", int(settings.effort));
-            f->glActiveTexture(GL_TEXTURE7);
-            f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
-            f->glBindVertexArray(m->vertex_array);
-            f->glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, m->transform_feedback);
-            f->glEnable(GL_RASTERIZER_DISCARD);
+    GLint previous_draw_framebuffer = 0;
+    GLint previous_viewport[4] = {};
+    GLboolean previous_colour_mask[4] = {};
+    GLboolean blend_enabled = GL_FALSE;
+    GLboolean cull_enabled = GL_FALSE;
+    GLboolean depth_enabled = GL_FALSE;
+    GLboolean scissor_enabled = GL_FALSE;
 
-            for (unsigned level = 0; level < result.mip_levels; ++level) {
-                const auto level_width = std::max(1u, m->width >> level);
-                const auto level_height = std::max(1u, m->height >> level);
-                const auto level_size = compressed_level_size(level_width, level_height) * textures.size();
-                program->set_uniform("texture_width", int(level_width));
-                program->set_uniform("texture_height", int(level_height));
-                program->set_uniform("blocks_x", level_blocks_x[level]);
-                program->set_uniform("blocks_y", level_blocks_y[level]);
-                program->set_uniform("mip_level", int(level));
-                f->glBindBufferRange(GL_TRANSFORM_FEEDBACK_BUFFER,
-                    0,
-                    m->encoded_buffer,
-                    GLintptr(level_offsets[level]),
-                    GLsizeiptr(level_size));
-                f->glBeginTransformFeedback(GL_POINTS);
-                f->glDrawArrays(GL_POINTS, 0, GLsizei(level_blocks_x[level] * level_blocks_y[level] * int(textures.size())));
-                f->glEndTransformFeedback();
-            }
+    result.timings.compression_pass = measure_stage(GpuTimer::Stage::CompressionPass, [&]() {
+        auto* program = settings.algorithm == nucleus::utils::ColourTexture::Format::DXT1 ? m->dxt1_fragment_program.get() : m->etc1_fragment_program.get();
+        f->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_framebuffer);
+        f->glGetIntegerv(GL_VIEWPORT, previous_viewport);
+        f->glGetBooleanv(GL_COLOR_WRITEMASK, previous_colour_mask);
+        blend_enabled = f->glIsEnabled(GL_BLEND);
+        cull_enabled = f->glIsEnabled(GL_CULL_FACE);
+        depth_enabled = f->glIsEnabled(GL_DEPTH_TEST);
+        scissor_enabled = f->glIsEnabled(GL_SCISSOR_TEST);
 
-            f->glDisable(GL_RASTERIZER_DISCARD);
-            f->glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, 0);
-            f->glBindVertexArray(0);
-            program->release();
-        });
-        result.timings.encoding = result.timings.compression_pass;
-    } else {
-        GLint previous_draw_framebuffer = 0;
-        GLint previous_viewport[4] = {};
-        GLboolean previous_colour_mask[4] = {};
-        GLboolean blend_enabled = GL_FALSE;
-        GLboolean cull_enabled = GL_FALSE;
-        GLboolean depth_enabled = GL_FALSE;
-        GLboolean scissor_enabled = GL_FALSE;
+        f->glDisable(GL_BLEND);
+        f->glDisable(GL_CULL_FACE);
+        f->glDisable(GL_DEPTH_TEST);
+        f->glDisable(GL_SCISSOR_TEST);
+        f->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
-        result.timings.compression_pass = measure_stage(GpuTimer::Stage::CompressionPass, [&]() {
-            auto* program = settings.algorithm == nucleus::utils::ColourTexture::Format::DXT1 ? m->dxt1_fragment_program.get() : m->etc1_fragment_program.get();
-            f->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_framebuffer);
-            f->glGetIntegerv(GL_VIEWPORT, previous_viewport);
-            f->glGetBooleanv(GL_COLOR_WRITEMASK, previous_colour_mask);
-            blend_enabled = f->glIsEnabled(GL_BLEND);
-            cull_enabled = f->glIsEnabled(GL_CULL_FACE);
-            depth_enabled = f->glIsEnabled(GL_DEPTH_TEST);
-            scissor_enabled = f->glIsEnabled(GL_SCISSOR_TEST);
+        f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m->encoding_framebuffer);
+        f->glViewport(0, 0, m->block_atlas_width, m->block_atlas_height);
+        program->bind();
+        program->set_uniform("source_texture", 7);
+        program->set_uniform("texture_width", int(m->width));
+        program->set_uniform("texture_height", int(m->height));
+        program->set_uniform("effort", int(settings.effort));
+        program->set_uniform("atlas_width", int(m->block_atlas_width));
+        program->set_uniform("total_blocks", int(total_encoded_size / 8));
+        program->set_uniform("mip_levels", int(result.mip_levels));
+        program->set_uniform_array("level_offsets", level_offsets_blocks);
+        program->set_uniform_array("level_blocks_x", level_blocks_x);
+        program->set_uniform_array("level_blocks_y", level_blocks_y);
+        f->glActiveTexture(GL_TEXTURE7);
+        f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
+        f->glBindVertexArray(m->vertex_array);
+        f->glDrawArrays(GL_TRIANGLES, 0, 3);
+    });
 
-            f->glDisable(GL_BLEND);
-            f->glDisable(GL_CULL_FACE);
-            f->glDisable(GL_DEPTH_TEST);
-            f->glDisable(GL_SCISSOR_TEST);
-            f->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    result.timings.packing_pass = measure_stage(GpuTimer::Stage::PackingPass, [&]() {
+        f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m->packing_framebuffer);
+        f->glViewport(0, 0, m->output_atlas_width, m->output_atlas_height);
+        m->packing_program->bind();
+        m->packing_program->set_uniform("encoded_blocks", 6);
+        m->packing_program->set_uniform("block_atlas_width", int(m->block_atlas_width));
+        m->packing_program->set_uniform("output_atlas_width", int(m->output_atlas_width));
+        m->packing_program->set_uniform("total_blocks", int(total_encoded_size / 8));
+        f->glActiveTexture(GL_TEXTURE6);
+        f->glBindTexture(GL_TEXTURE_2D, m->encoded_texture);
+        f->glDrawArrays(GL_TRIANGLES, 0, 3);
+        f->glBindVertexArray(0);
+        m->packing_program->release();
 
-            f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m->encoding_framebuffer);
-            f->glViewport(0, 0, m->block_atlas_width, m->block_atlas_height);
-            program->bind();
-            program->set_uniform("source_texture", 7);
-            program->set_uniform("texture_width", int(m->width));
-            program->set_uniform("texture_height", int(m->height));
-            program->set_uniform("effort", int(settings.effort));
-            program->set_uniform("atlas_width", int(m->block_atlas_width));
-            program->set_uniform("total_blocks", int(total_encoded_size / 8));
-            program->set_uniform("mip_levels", int(result.mip_levels));
-            program->set_uniform_array("level_offsets", level_offsets_blocks);
-            program->set_uniform_array("level_blocks_x", level_blocks_x);
-            program->set_uniform_array("level_blocks_y", level_blocks_y);
-            f->glActiveTexture(GL_TEXTURE7);
-            f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
-            f->glBindVertexArray(m->vertex_array);
-            f->glDrawArrays(GL_TRIANGLES, 0, 3);
-        });
+        if (blend_enabled)
+            f->glEnable(GL_BLEND);
+        if (cull_enabled)
+            f->glEnable(GL_CULL_FACE);
+        if (depth_enabled)
+            f->glEnable(GL_DEPTH_TEST);
+        if (scissor_enabled)
+            f->glEnable(GL_SCISSOR_TEST);
+        f->glColorMask(previous_colour_mask[0], previous_colour_mask[1], previous_colour_mask[2], previous_colour_mask[3]);
+        f->glViewport(previous_viewport[0], previous_viewport[1], previous_viewport[2], previous_viewport[3]);
+        f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(previous_draw_framebuffer));
+    });
+    result.timings.encoding.submission_ms
+        = result.timings.compression_pass.submission_ms + result.timings.packing_pass.submission_ms;
+    result.timings.encoding.completion_wait_ms
+        = result.timings.compression_pass.completion_wait_ms + result.timings.packing_pass.completion_wait_ms;
 
-        result.timings.packing_pass = measure_stage(GpuTimer::Stage::PackingPass, [&]() {
-            f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m->packing_framebuffer);
-            f->glViewport(0, 0, m->output_atlas_width, m->output_atlas_height);
-            m->packing_program->bind();
-            m->packing_program->set_uniform("encoded_blocks", 6);
-            m->packing_program->set_uniform("block_atlas_width", int(m->block_atlas_width));
-            m->packing_program->set_uniform("output_atlas_width", int(m->output_atlas_width));
-            m->packing_program->set_uniform("total_blocks", int(total_encoded_size / 8));
-            f->glActiveTexture(GL_TEXTURE6);
-            f->glBindTexture(GL_TEXTURE_2D, m->encoded_texture);
-            f->glDrawArrays(GL_TRIANGLES, 0, 3);
-            f->glBindVertexArray(0);
-            m->packing_program->release();
-
-            if (blend_enabled)
-                f->glEnable(GL_BLEND);
-            if (cull_enabled)
-                f->glEnable(GL_CULL_FACE);
-            if (depth_enabled)
-                f->glEnable(GL_DEPTH_TEST);
-            if (scissor_enabled)
-                f->glEnable(GL_SCISSOR_TEST);
-            f->glColorMask(previous_colour_mask[0], previous_colour_mask[1], previous_colour_mask[2], previous_colour_mask[3]);
-            f->glViewport(previous_viewport[0], previous_viewport[1], previous_viewport[2], previous_viewport[3]);
-            f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(previous_draw_framebuffer));
-        });
-        result.timings.encoding.submission_ms
-            = result.timings.compression_pass.submission_ms + result.timings.packing_pass.submission_ms;
-        result.timings.encoding.completion_wait_ms
-            = result.timings.compression_pass.completion_wait_ms + result.timings.packing_pass.completion_wait_ms;
-
-        result.timings.output_transfer = measure_stage(GpuTimer::Stage::OutputTransfer, [&]() {
-            GLint previous_read_framebuffer = 0;
-            GLint previous_read_buffer = 0;
-            GLint previous_pack_alignment = 0;
-            f->glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_framebuffer);
-            f->glGetIntegerv(GL_READ_BUFFER, &previous_read_buffer);
-            f->glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack_alignment);
-            f->glBindFramebuffer(GL_READ_FRAMEBUFFER, m->packing_framebuffer);
-            f->glReadBuffer(GL_COLOR_ATTACHMENT0);
-            f->glPixelStorei(GL_PACK_ALIGNMENT, 1);
-            f->glBindBuffer(GL_PIXEL_PACK_BUFFER, m->encoded_buffer);
-            f->glReadPixels(0, 0, m->output_atlas_width, m->output_atlas_height, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, nullptr);
-            f->glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-            f->glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
-            f->glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(previous_read_framebuffer));
-            f->glReadBuffer(GLenum(previous_read_buffer));
-        });
-    }
+    result.timings.output_transfer = measure_stage(GpuTimer::Stage::OutputTransfer, [&]() {
+        GLint previous_read_framebuffer = 0;
+        GLint previous_read_buffer = 0;
+        GLint previous_pack_alignment = 0;
+        f->glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_framebuffer);
+        f->glGetIntegerv(GL_READ_BUFFER, &previous_read_buffer);
+        f->glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack_alignment);
+        f->glBindFramebuffer(GL_READ_FRAMEBUFFER, m->packing_framebuffer);
+        f->glReadBuffer(GL_COLOR_ATTACHMENT0);
+        f->glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        f->glBindBuffer(GL_PIXEL_PACK_BUFFER, m->encoded_buffer);
+        f->glReadPixels(0, 0, m->output_atlas_width, m->output_atlas_height, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, nullptr);
+        f->glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        f->glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
+        f->glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(previous_read_framebuffer));
+        f->glReadBuffer(GLenum(previous_read_buffer));
+    });
 
     result.timings.compressed_upload = measure_stage(GpuTimer::Stage::CompressedUpload, [&]() {
         f->glBindTexture(GL_TEXTURE_2D_ARRAY, destination.m_id);

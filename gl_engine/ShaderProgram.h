@@ -56,7 +56,6 @@ private:
     QString m_fragment_shader;  // either filename or native shader code
     ShaderCodeSource m_code_source;
     std::vector<QString> m_defines;
-    std::vector<QByteArray> m_transform_feedback_varyings;
 
 #if ALP_ENABLE_SHADER_NETWORK_HOTRELOAD
     // A temporary cache for the downloaded shader files.
@@ -88,8 +87,7 @@ public:
     ShaderProgram(QString vertex_shader,
         QString fragment_shader,
         ShaderCodeSource code_source = ShaderCodeSource::FILE,
-        const std::vector<QString>& defines = {},
-        const std::vector<QByteArray>& transform_feedback_varyings = {});
+        const std::vector<QString>& defines = {});
 
     int attribute_location(const std::string& name);
     void bind();

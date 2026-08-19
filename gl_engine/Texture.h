@@ -92,7 +92,6 @@ private:
 
 class TextureCompressor {
 public:
-    enum class Backend { FragmentShader, TransformFeedback };
     enum class TimingMode { EndToEnd, IndividualStages, SubmissionOnly };
 
     struct GpuTimings {
@@ -137,7 +136,6 @@ public:
         nucleus::utils::ColourTexture::Format algorithm = nucleus::utils::ColourTexture::Format::DXT1;
         unsigned effort = 0;
         bool generate_mipmaps = true;
-        Backend backend = Backend::FragmentShader;
         TimingMode timing_mode = TimingMode::EndToEnd;
         GpuTimer* gpu_timer = nullptr;
     };
@@ -184,7 +182,6 @@ public:
     [[nodiscard]] static size_t compressed_level_size(unsigned width, unsigned height);
     [[nodiscard]] static unsigned mip_level_count(unsigned width, unsigned height);
     [[nodiscard]] static bool is_supported();
-    [[nodiscard]] static bool is_backend_supported(Backend backend);
 
 private:
     struct Impl;
