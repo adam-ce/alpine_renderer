@@ -288,11 +288,31 @@ QString preview_data_url(std::span<const QImage> images)
 {
     constexpr int columns = 4;
     constexpr int tile_size = 512;
+    static const auto linear_to_srgb = [] {
+        std::array<uint8_t, 256> result {};
+        for (size_t i = 0; i < result.size(); ++i) {
+            const auto linear = double(i) / 255.0;
+            const auto srgb = linear <= 0.0031308 ? 12.92 * linear : 1.055 * std::pow(linear, 1.0 / 2.4) - 0.055;
+            result[i] = uint8_t(std::lround(std::clamp(srgb, 0.0, 1.0) * 255.0));
+        }
+        return result;
+    }();
     QImage preview(columns * tile_size, columns * tile_size, QImage::Format_RGBA8888);
     preview.fill(Qt::black);
     QPainter painter(&preview);
-    for (size_t i = 0; i < images.size(); ++i)
-        painter.drawImage(QPoint(int(i % columns) * tile_size, int(i / columns) * tile_size), images[i]);
+    for (size_t i = 0; i < images.size(); ++i) {
+        auto srgb_image = images[i].convertToFormat(QImage::Format_RGBA8888);
+        for (int y = 0; y < srgb_image.height(); ++y) {
+            auto* scanline = srgb_image.scanLine(y);
+            for (int x = 0; x < srgb_image.width(); ++x) {
+                auto* pixel = scanline + x * 4;
+                pixel[0] = linear_to_srgb[pixel[0]];
+                pixel[1] = linear_to_srgb[pixel[1]];
+                pixel[2] = linear_to_srgb[pixel[2]];
+            }
+        }
+        painter.drawImage(QPoint(int(i % columns) * tile_size, int(i / columns) * tile_size), srgb_image);
+    }
     painter.end();
 
     QByteArray png;

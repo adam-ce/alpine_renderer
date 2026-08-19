@@ -191,11 +191,54 @@ ApplicationWindow {
                 standardButtons: Dialog.Close
                 onClosed: previewDialogLoader.active = false
 
-                contentItem: Image {
-                    source: benchmark.previewSource
-                    sourceSize: Qt.size(2048, 2048)
-                    asynchronous: true
-                    fillMode: Image.PreserveAspectFit
+                contentItem: Flickable {
+                    id: previewViewport
+
+                    property real zoom: 1.0
+                    property real pinchStartZoom: 1.0
+                    property real pinchStartContentX: 0.0
+                    property real pinchStartContentY: 0.0
+
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    contentWidth: Math.max(width, previewImage.width)
+                    contentHeight: Math.max(height, previewImage.height)
+
+                    Image {
+                        id: previewImage
+
+                        readonly property real fittedSize: Math.min(previewViewport.width, previewViewport.height)
+
+                        x: (previewViewport.contentWidth - width) / 2
+                        y: (previewViewport.contentHeight - height) / 2
+                        width: fittedSize * previewViewport.zoom
+                        height: width
+                        source: benchmark.previewSource
+                        sourceSize: Qt.size(2048, 2048)
+                        asynchronous: true
+                        fillMode: Image.PreserveAspectFit
+                    }
+
+                    PinchHandler {
+                        target: null
+
+                        onActiveChanged: {
+                            if (active) {
+                                previewViewport.pinchStartZoom = previewViewport.zoom
+                                previewViewport.pinchStartContentX = previewViewport.contentX
+                                previewViewport.pinchStartContentY = previewViewport.contentY
+                            } else {
+                                previewViewport.returnToBounds()
+                            }
+                        }
+                        onActiveScaleChanged: {
+                            const newZoom = Math.max(1.0, Math.min(8.0, previewViewport.pinchStartZoom * activeScale))
+                            const zoomRatio = newZoom / previewViewport.pinchStartZoom
+                            previewViewport.zoom = newZoom
+                            previewViewport.contentX = (previewViewport.pinchStartContentX + centroid.position.x) * zoomRatio - centroid.position.x
+                            previewViewport.contentY = (previewViewport.pinchStartContentY + centroid.position.y) * zoomRatio - centroid.position.y
+                        }
+                    }
                 }
             }
         }
