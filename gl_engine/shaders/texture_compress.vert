@@ -108,6 +108,71 @@ highp int modifier(highp int table, highp int index)
     return modifiers[table][index];
 }
 
+highp int brightness(highp uvec3 colour)
+{
+    return int((colour.r + 2u * colour.g + colour.b + 2u) / 4u);
+}
+
+highp int table_for_range(highp int range)
+{
+    if (range < 22)
+        return 0;
+    if (range < 44)
+        return 1;
+    if (range < 74)
+        return 2;
+    if (range < 106)
+        return 3;
+    if (range < 152)
+        return 4;
+    if (range < 182)
+        return 5;
+    if (range < 254)
+        return 6;
+    return 7;
+}
+
+highp uvec2 encode_etc1_fast(highp uvec3 pixels[16])
+{
+    highp uvec3 minimum_colour = uvec3(255u);
+    highp uvec3 maximum_colour = uvec3(0u);
+    highp uvec3 sum = uvec3(0u);
+    for (int i = 0; i < 16; ++i) {
+        minimum_colour = min(minimum_colour, pixels[i]);
+        maximum_colour = max(maximum_colour, pixels[i]);
+        sum += pixels[i];
+    }
+
+    highp int minimum_brightness = brightness(minimum_colour);
+    highp int maximum_brightness = brightness(maximum_colour);
+    highp int range = max(8, maximum_brightness - minimum_brightness);
+    highp int middle = (minimum_brightness + maximum_brightness + 1) / 2;
+    highp ivec3 average = ivec3((sum + 8u) / 16u);
+    highp int correction = middle - brightness(uvec3(average));
+    highp ivec3 adjusted = clamp(average + ivec3(correction), ivec3(0), ivec3(255));
+    highp uvec3 base5 = (uvec3(adjusted) * 31u + 127u) / 255u;
+
+    highp int table = table_for_range(range);
+    highp int threshold = (range * 3 + 4) / 8;
+    highp uint indices = 0u;
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            highp int pixel_index = y * 4 + x;
+            highp int delta = brightness(pixels[pixel_index]) - middle;
+            highp uint selected = uint(abs(delta) >= threshold);
+            if (delta < 0)
+                selected += 2u;
+            highp uint bit_position = uint(x * 4 + y);
+            indices |= (selected & 1u) << bit_position;
+            indices |= (selected >> 1u) << (bit_position + 16u);
+        }
+    }
+
+    highp uint control = uint(table) << 5u | uint(table) << 2u | 2u;
+    highp uint header = base5.r << 3u | base5.g << 11u | base5.b << 19u | control << 24u;
+    return uvec2(header, byte_swap(indices));
+}
+
 highp uvec2 encode_etc1(highp uvec3 pixels[16])
 {
     highp uvec3 sum = uvec3(0u);
@@ -181,7 +246,11 @@ highp uvec2 compress_block(highp ivec2 block,
     }
 
 #ifdef ALP_COMPRESS_ETC1
+#ifdef ALP_COMPRESS_ETC1_FAST
+    return encode_etc1_fast(pixels);
+#else
     return encode_etc1(pixels);
+#endif
 #else
     return encode_dxt1(pixels);
 #endif

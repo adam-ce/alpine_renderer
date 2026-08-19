@@ -20,6 +20,7 @@ class BenchmarkItem : public QQuickFramebufferObject {
     Q_PROPERTY(CpuEncoder cpuEncoder READ cpuEncoder WRITE setCpuEncoder NOTIFY cpuEncoderChanged)
     Q_PROPERTY(int basisQuality READ basisQuality WRITE setBasisQuality NOTIFY basisQualityChanged)
     Q_PROPERTY(int basisEffort READ basisEffort WRITE setBasisEffort NOTIFY basisEffortChanged)
+    Q_PROPERTY(GpuEncoder gpuEncoder READ gpuEncoder WRITE setGpuEncoder NOTIFY gpuEncoderChanged)
     Q_PROPERTY(int effort READ effort WRITE setEffort NOTIFY effortChanged)
     Q_PROPERTY(bool mipmaps READ mipmaps WRITE setMipmaps NOTIFY mipmapsChanged)
     Q_PROPERTY(bool dataReady READ dataReady NOTIFY dataReadyChanged)
@@ -32,6 +33,8 @@ class BenchmarkItem : public QQuickFramebufferObject {
 public:
     enum class CpuEncoder { Goofy, BasisEtc1s, BasisUastcLdr4x4, BasisXuastcLdr4x4 };
     Q_ENUM(CpuEncoder)
+    enum class GpuEncoder { Search, FastRange };
+    Q_ENUM(GpuEncoder)
 
     explicit BenchmarkItem(QQuickItem* parent = nullptr);
     Renderer* createRenderer() const override;
@@ -42,6 +45,8 @@ public:
     void setBasisQuality(int value);
     [[nodiscard]] int basisEffort() const;
     void setBasisEffort(int value);
+    [[nodiscard]] GpuEncoder gpuEncoder() const;
+    void setGpuEncoder(GpuEncoder value);
     [[nodiscard]] int effort() const;
     void setEffort(int value);
     [[nodiscard]] bool mipmaps() const;
@@ -60,6 +65,7 @@ signals:
     void cpuEncoderChanged();
     void basisQualityChanged();
     void basisEffortChanged();
+    void gpuEncoderChanged();
     void effortChanged();
     void mipmapsChanged();
     void dataReadyChanged();
@@ -78,6 +84,7 @@ private:
     CpuEncoder m_cpu_encoder = CpuEncoder::Goofy;
     int m_basis_quality = 75;
     int m_basis_effort = 4;
+    GpuEncoder m_gpu_encoder = GpuEncoder::FastRange;
     int m_effort = 4;
     bool m_mipmaps = true;
     bool m_data_ready = false;

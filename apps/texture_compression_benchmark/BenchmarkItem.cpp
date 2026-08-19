@@ -482,6 +482,7 @@ public:
         m_cpu_encoder = benchmark_item->m_cpu_encoder;
         m_basis_quality = benchmark_item->m_basis_quality;
         m_basis_effort = benchmark_item->m_basis_effort;
+        m_gpu_encoder = benchmark_item->m_gpu_encoder;
         m_effort = benchmark_item->m_effort;
         m_mipmaps = benchmark_item->m_mipmaps;
         m_source_images = benchmark_item->m_source_images;
@@ -835,11 +836,16 @@ private:
         }
 
         const auto algorithm = gl_engine::Texture::compression_algorithm();
-        const auto backend_name = QStringLiteral("Fragment shader + PBO");
+        const auto backend_name = m_gpu_encoder == BenchmarkItem::GpuEncoder::FastRange
+            ? QStringLiteral("Fragment shader fast range + PBO")
+            : QStringLiteral("Fragment shader search + PBO");
         const auto filter = m_mipmaps ? gl_engine::Texture::Filter::MipMapLinear : gl_engine::Texture::Filter::Linear;
         const gl_engine::TextureCompressor::Settings gpu_settings {
             .algorithm = algorithm,
             .effort = unsigned(m_effort),
+            .encoder = m_gpu_encoder == BenchmarkItem::GpuEncoder::FastRange
+                ? gl_engine::TextureCompressor::Encoder::FastRange
+                : gl_engine::TextureCompressor::Encoder::Search,
             .generate_mipmaps = m_mipmaps,
             .timing_mode = gl_engine::TextureCompressor::TimingMode::EndToEnd,
         };
@@ -1026,6 +1032,7 @@ private:
             { QStringLiteral("gpu_stage_profile_samples"), sample_count },
             { QStringLiteral("basis_quality"), m_basis_quality },
             { QStringLiteral("basis_effort"), m_basis_effort },
+            { QStringLiteral("gpu_encoder"), backend_name },
             { QStringLiteral("gpu_effort"), m_effort },
             { QStringLiteral("mipmaps"), m_mipmaps },
             { QStringLiteral("dataset"), dataset_json() },
@@ -1196,6 +1203,7 @@ private:
     BenchmarkItem::CpuEncoder m_cpu_encoder = BenchmarkItem::CpuEncoder::Goofy;
     int m_basis_quality = 75;
     int m_basis_effort = 4;
+    BenchmarkItem::GpuEncoder m_gpu_encoder = BenchmarkItem::GpuEncoder::FastRange;
     int m_effort = 4;
     bool m_mipmaps = true;
     bool m_pending = false;
@@ -1241,6 +1249,15 @@ void BenchmarkItem::setBasisEffort(int value)
         return;
     m_basis_effort = value;
     emit basisEffortChanged();
+}
+
+BenchmarkItem::GpuEncoder BenchmarkItem::gpuEncoder() const { return m_gpu_encoder; }
+void BenchmarkItem::setGpuEncoder(GpuEncoder value)
+{
+    if (m_gpu_encoder == value)
+        return;
+    m_gpu_encoder = value;
+    emit gpuEncoderChanged();
 }
 
 int BenchmarkItem::effort() const { return m_effort; }

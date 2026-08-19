@@ -93,6 +93,7 @@ private:
 class TextureCompressor {
 public:
     enum class TimingMode { EndToEnd, IndividualStages, SubmissionOnly };
+    enum class Encoder { Search, FastRange };
 
     struct GpuTimings {
         double scratch_upload_ms = 0.0;
@@ -135,6 +136,7 @@ public:
     struct Settings {
         nucleus::utils::ColourTexture::Format algorithm = nucleus::utils::ColourTexture::Format::DXT1;
         unsigned effort = 0;
+        Encoder encoder = Encoder::Search;
         bool generate_mipmaps = true;
         TimingMode timing_mode = TimingMode::EndToEnd;
         GpuTimer* gpu_timer = nullptr;

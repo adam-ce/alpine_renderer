@@ -693,6 +693,7 @@ struct gl_engine::TextureCompressor::Impl {
     GLuint packing_renderbuffer = 0;
     std::unique_ptr<ShaderProgram> dxt1_fragment_program;
     std::unique_ptr<ShaderProgram> etc1_fragment_program;
+    std::unique_ptr<ShaderProgram> etc1_fast_fragment_program;
     std::unique_ptr<ShaderProgram> packing_program;
 
     Impl(unsigned texture_width, unsigned texture_height, unsigned maximum_batch_size)
@@ -775,6 +776,10 @@ struct gl_engine::TextureCompressor::Impl {
             "texture_compress.vert",
             ShaderCodeSource::FILE,
             std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1") });
+        etc1_fast_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
+            "texture_compress.vert",
+            ShaderCodeSource::FILE,
+            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1"), QStringLiteral("#define ALP_COMPRESS_ETC1_FAST") });
         packing_program = std::make_unique<ShaderProgram>(
             "texture_compress_raster.vert", "texture_compress_pack.frag", ShaderCodeSource::FILE);
 
@@ -784,6 +789,7 @@ struct gl_engine::TextureCompressor::Impl {
     {
         dxt1_fragment_program.reset();
         etc1_fragment_program.reset();
+        etc1_fast_fragment_program.reset();
         packing_program.reset();
         if (!QOpenGLContext::currentContext())
             return;
@@ -946,7 +952,10 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
     GLboolean scissor_enabled = GL_FALSE;
 
     result.timings.compression_pass = measure_stage(GpuTimer::Stage::CompressionPass, [&]() {
-        auto* program = settings.algorithm == nucleus::utils::ColourTexture::Format::DXT1 ? m->dxt1_fragment_program.get() : m->etc1_fragment_program.get();
+        auto* program = settings.algorithm == nucleus::utils::ColourTexture::Format::DXT1
+            ? m->dxt1_fragment_program.get()
+            : settings.encoder == Encoder::FastRange ? m->etc1_fast_fragment_program.get()
+                                                     : m->etc1_fragment_program.get();
         f->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_framebuffer);
         f->glGetIntegerv(GL_VIEWPORT, previous_viewport);
         f->glGetBooleanv(GL_COLOR_WRITEMASK, previous_colour_mask);

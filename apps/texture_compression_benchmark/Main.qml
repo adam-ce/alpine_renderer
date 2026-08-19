@@ -118,6 +118,7 @@ ApplicationWindow {
                     Label {
                         Layout.fillWidth: true
                         text: qsTr("GPU effort: %1").arg(benchmark.effort)
+                        enabled: benchmark.gpuEncoder === BenchmarkItem.Search
                     }
 
                     Slider {
@@ -127,7 +128,7 @@ ApplicationWindow {
                         to: 10
                         stepSize: 1
                         value: benchmark.effort
-                        enabled: !benchmark.running
+                        enabled: !benchmark.running && benchmark.gpuEncoder === BenchmarkItem.Search
                         onMoved: benchmark.effort = Math.round(value)
                     }
 
@@ -139,9 +140,15 @@ ApplicationWindow {
                             text: qsTr("GPU encoder")
                         }
 
-                        Label {
-                            Layout.preferredWidth: 220
-                            text: qsTr("Fragment shader + PBO")
+                        ComboBox {
+                            Layout.preferredWidth: 260
+                            model: [
+                                qsTr("Search (reference)"),
+                                qsTr("Fast range (Goofy-inspired)")
+                            ]
+                            currentIndex: benchmark.gpuEncoder
+                            enabled: !benchmark.running
+                            onActivated: benchmark.gpuEncoder = currentIndex
                         }
                     }
 
