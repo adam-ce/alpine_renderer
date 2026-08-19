@@ -17,6 +17,9 @@ class QNetworkAccessManager;
 class BenchmarkItem : public QQuickFramebufferObject {
     Q_OBJECT
     QML_ELEMENT
+    Q_PROPERTY(CpuEncoder cpuEncoder READ cpuEncoder WRITE setCpuEncoder NOTIFY cpuEncoderChanged)
+    Q_PROPERTY(int basisQuality READ basisQuality WRITE setBasisQuality NOTIFY basisQualityChanged)
+    Q_PROPERTY(int basisEffort READ basisEffort WRITE setBasisEffort NOTIFY basisEffortChanged)
     Q_PROPERTY(int effort READ effort WRITE setEffort NOTIFY effortChanged)
     Q_PROPERTY(bool mipmaps READ mipmaps WRITE setMipmaps NOTIFY mipmapsChanged)
     Q_PROPERTY(bool dataReady READ dataReady NOTIFY dataReadyChanged)
@@ -27,9 +30,18 @@ class BenchmarkItem : public QQuickFramebufferObject {
     Q_PROPERTY(QString previewSource READ previewSource NOTIFY previewSourceChanged)
 
 public:
+    enum class CpuEncoder { Goofy, BasisEtc1s, BasisUastcLdr4x4, BasisXuastcLdr4x4 };
+    Q_ENUM(CpuEncoder)
+
     explicit BenchmarkItem(QQuickItem* parent = nullptr);
     Renderer* createRenderer() const override;
 
+    [[nodiscard]] CpuEncoder cpuEncoder() const;
+    void setCpuEncoder(CpuEncoder value);
+    [[nodiscard]] int basisQuality() const;
+    void setBasisQuality(int value);
+    [[nodiscard]] int basisEffort() const;
+    void setBasisEffort(int value);
     [[nodiscard]] int effort() const;
     void setEffort(int value);
     [[nodiscard]] bool mipmaps() const;
@@ -45,6 +57,9 @@ public:
     Q_INVOKABLE void copyResultJson();
 
 signals:
+    void cpuEncoderChanged();
+    void basisQualityChanged();
+    void basisEffortChanged();
     void effortChanged();
     void mipmapsChanged();
     void dataReadyChanged();
@@ -60,6 +75,9 @@ private:
     void stitchBenchmarkData();
     void publishResults(const QString& text, const QString& json, const QString& preview_source);
 
+    CpuEncoder m_cpu_encoder = CpuEncoder::Goofy;
+    int m_basis_quality = 75;
+    int m_basis_effort = 4;
     int m_effort = 4;
     bool m_mipmaps = true;
     bool m_data_ready = false;

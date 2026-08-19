@@ -7,7 +7,7 @@ ApplicationWindow {
     id: root
 
     width: 900
-    height: 760
+    height: 900
     minimumWidth: 360
     minimumHeight: 640
     visible: true
@@ -47,7 +47,7 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.leftMargin: 20
                 Layout.rightMargin: 20
-                text: qsTr("Measures DXT1 or ETC1 compression of varied 512×512 ortho imagery in batches of four. Quality is computed once over all 16 images; timing covers three rounds of four distinct batches. WebGL requires ETC or sRGB S3TC compressed textures.")
+                text: qsTr("Compares direct CPU compression, Basis Universal encoding paths, and GPU compression of varied 512×512 ortho imagery in batches of four. Quality is computed once over all 16 images; timing covers three rounds of four distinct batches. WebGL requires ETC or sRGB S3TC compressed textures.")
                 wrapMode: Text.Wrap
             }
 
@@ -60,6 +60,60 @@ ApplicationWindow {
                 ColumnLayout {
                     anchors.fill: parent
                     spacing: 12
+
+                    RowLayout {
+                        Layout.fillWidth: true
+
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr("CPU encoder")
+                        }
+
+                        ComboBox {
+                            Layout.preferredWidth: 260
+                            model: [
+                                qsTr("Goofy direct (baseline)"),
+                                qsTr("BasisU ETC1S"),
+                                qsTr("BasisU UASTC LDR 4×4"),
+                                qsTr("BasisU XUASTC LDR 4×4")
+                            ]
+                            currentIndex: benchmark.cpuEncoder
+                            enabled: !benchmark.running
+                            onActivated: benchmark.cpuEncoder = currentIndex
+                        }
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("BasisU quality: %1").arg(benchmark.basisQuality)
+                        enabled: benchmark.cpuEncoder !== BenchmarkItem.Goofy
+                    }
+
+                    Slider {
+                        Layout.fillWidth: true
+                        from: 1
+                        to: 100
+                        stepSize: 1
+                        value: benchmark.basisQuality
+                        enabled: !benchmark.running && benchmark.cpuEncoder !== BenchmarkItem.Goofy
+                        onMoved: benchmark.basisQuality = Math.round(value)
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("BasisU effort: %1").arg(benchmark.basisEffort)
+                        enabled: benchmark.cpuEncoder !== BenchmarkItem.Goofy
+                    }
+
+                    Slider {
+                        Layout.fillWidth: true
+                        from: 0
+                        to: 10
+                        stepSize: 1
+                        value: benchmark.basisEffort
+                        enabled: !benchmark.running && benchmark.cpuEncoder !== BenchmarkItem.Goofy
+                        onMoved: benchmark.basisEffort = Math.round(value)
+                    }
 
                     Label {
                         Layout.fillWidth: true
@@ -123,7 +177,7 @@ ApplicationWindow {
                 Label {
                     Layout.fillWidth: true
                     text: benchmark.running
-                        ? qsTr("Computing PSNR, then measuring batch size 4; the display may pause to avoid contaminating GPU measurements.")
+                        ? qsTr("Computing PSNR, BasisU encoding/transcoding, and batch timings; the display may pause to avoid contaminating GPU measurements.")
                         : benchmark.dataStatus
                     wrapMode: Text.Wrap
                 }
@@ -152,7 +206,7 @@ ApplicationWindow {
                         Layout.fillWidth: true
 
                         Button {
-                            text: qsTr("Preview compressed tiles")
+                            text: qsTr("Preview selected CPU encoder")
                             enabled: !benchmark.running && benchmark.previewSource.length > 0
                             onClicked: previewDialogLoader.active = true
                         }
@@ -187,7 +241,7 @@ ApplicationWindow {
                 width: Math.min(root.width - 40, 820)
                 height: Math.min(root.height - 40, 880)
                 modal: true
-                title: qsTr("GPU-compressed tiles")
+                title: qsTr("Selected CPU-compressed tiles")
                 standardButtons: Dialog.Close
                 onClosed: previewDialogLoader.active = false
 

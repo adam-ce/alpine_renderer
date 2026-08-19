@@ -6,6 +6,32 @@
 
 project(texture-compression-benchmark LANGUAGES CXX)
 
+alp_add_git_repository(basisu
+    URL https://github.com/BinomialLLC/basis_universal.git
+    COMMITISH 9bebe16726b3a61c8c213eeee3b7cffb462ef34e
+    DO_NOT_ADD_SUBPROJECT)
+set(BASISU_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BASISU_SSE OFF CACHE BOOL "" FORCE)
+set(BASISU_ZSTD OFF CACHE BOOL "" FORCE)
+set(BASISU_OPENCL OFF CACHE BOOL "" FORCE)
+set(BASISU_DISABLE_ANDROID_ASTC_DECOMP ON CACHE BOOL "" FORCE)
+add_subdirectory("${basisu_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/basisu" EXCLUDE_FROM_ALL)
+
+add_library(alp_basisu_texture_compression STATIC
+    ${CMAKE_SOURCE_DIR}/nucleus/utils/BasisUniversalTextureCompression.h
+    ${CMAKE_SOURCE_DIR}/nucleus/utils/BasisUniversalTextureCompression.cpp
+)
+target_include_directories(alp_basisu_texture_compression SYSTEM PRIVATE "${basisu_SOURCE_DIR}")
+target_compile_definitions(alp_basisu_texture_compression PRIVATE
+    BASISD_SUPPORT_KTX2_ZSTD=0
+    BASISU_SUPPORT_SSE=0
+)
+target_link_libraries(alp_basisu_texture_compression PUBLIC nucleus PRIVATE basisu_encoder)
+if (UNIX AND NOT ANDROID AND NOT EMSCRIPTEN)
+    target_link_libraries(alp_basisu_texture_compression PRIVATE m pthread)
+endif()
+alp_configure_target(alp_basisu_texture_compression)
+
 qt_add_executable(texture_compression_benchmark
     main.cpp
     BenchmarkItem.h
@@ -25,7 +51,7 @@ qt_add_resources(texture_compression_benchmark "fonts"
     FILES "${alpineapp_fonts_SOURCE_DIR}/Roboto/Roboto-Regular.ttf"
 )
 
-target_link_libraries(texture_compression_benchmark PUBLIC gl_engine Qt::Network Qt::Quick Qt::QuickControls2)
+target_link_libraries(texture_compression_benchmark PUBLIC alp_basisu_texture_compression gl_engine Qt::Network Qt::Quick Qt::QuickControls2)
 alp_configure_target(texture_compression_benchmark)
 
 if (ANDROID)

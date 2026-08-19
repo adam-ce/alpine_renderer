@@ -28,6 +28,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <expected>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -39,6 +40,7 @@
 #include <gl_engine/Texture.h>
 #include <gl_engine/helpers.h>
 #include <nucleus/tile/conversion.h>
+#include <nucleus/utils/BasisUniversalTextureCompression.h>
 #include <nucleus/utils/ColourTexture.h>
 #if defined(__EMSCRIPTEN__)
 #include <webgl/webgl2.h>
@@ -128,6 +130,14 @@ QJsonObject to_json(const Statistics& value)
         { QStringLiteral("p95_ms"), value.p95 },
         { QStringLiteral("min_ms"), value.minimum },
         { QStringLiteral("max_ms"), value.maximum } };
+}
+
+QJsonObject size_to_json(const Statistics& value)
+{
+    return { { QStringLiteral("median_bytes"), value.median },
+        { QStringLiteral("p95_bytes"), value.p95 },
+        { QStringLiteral("min_bytes"), value.minimum },
+        { QStringLiteral("max_bytes"), value.maximum } };
 }
 
 QJsonArray samples_to_json(const std::vector<double>& values)
@@ -322,19 +332,86 @@ QString preview_data_url(std::span<const QImage> images)
     return QStringLiteral("data:image/png;base64,") + QString::fromLatin1(png.toBase64());
 }
 
-std::vector<nucleus::utils::MipmappedColourTexture> cpu_compress(
-    std::span<const Raster> sources, nucleus::utils::ColourTexture::Format algorithm, bool mipmaps)
+struct CpuCompressionResult {
+    std::vector<nucleus::utils::MipmappedColourTexture> textures;
+    double source_preparation_ms = 0.0;
+    double encoding_ms = 0.0;
+    double transcoding_ms = 0.0;
+    size_t intermediate_bytes = 0;
+    size_t transcoded_bytes = 0;
+};
+
+QString cpu_encoder_name(BenchmarkItem::CpuEncoder encoder)
 {
-    std::vector<nucleus::utils::MipmappedColourTexture> result;
-    result.reserve(sources.size());
+    switch (encoder) {
+    case BenchmarkItem::CpuEncoder::Goofy:
+        return QStringLiteral("Goofy direct");
+    case BenchmarkItem::CpuEncoder::BasisEtc1s:
+        return QString::fromLatin1(nucleus::utils::basis_universal_format_name(nucleus::utils::BasisUniversalFormat::ETC1S));
+    case BenchmarkItem::CpuEncoder::BasisUastcLdr4x4:
+        return QString::fromLatin1(nucleus::utils::basis_universal_format_name(nucleus::utils::BasisUniversalFormat::UASTC_LDR_4x4));
+    case BenchmarkItem::CpuEncoder::BasisXuastcLdr4x4:
+        return QString::fromLatin1(nucleus::utils::basis_universal_format_name(nucleus::utils::BasisUniversalFormat::XUASTC_LDR_4x4));
+    }
+    return QStringLiteral("Unknown");
+}
+
+nucleus::utils::BasisUniversalFormat basis_format(BenchmarkItem::CpuEncoder encoder)
+{
+    switch (encoder) {
+    case BenchmarkItem::CpuEncoder::BasisEtc1s:
+        return nucleus::utils::BasisUniversalFormat::ETC1S;
+    case BenchmarkItem::CpuEncoder::BasisUastcLdr4x4:
+        return nucleus::utils::BasisUniversalFormat::UASTC_LDR_4x4;
+    case BenchmarkItem::CpuEncoder::BasisXuastcLdr4x4:
+        return nucleus::utils::BasisUniversalFormat::XUASTC_LDR_4x4;
+    case BenchmarkItem::CpuEncoder::Goofy:
+        break;
+    }
+    return nucleus::utils::BasisUniversalFormat::ETC1S;
+}
+
+std::expected<CpuCompressionResult, QString> cpu_compress(std::span<const Raster> sources,
+    nucleus::utils::ColourTexture::Format algorithm,
+    bool mipmaps,
+    BenchmarkItem::CpuEncoder encoder,
+    int basis_quality,
+    int basis_effort)
+{
+    CpuCompressionResult result;
+    result.textures.reserve(sources.size());
     for (const auto& source : sources) {
-        if (mipmaps) {
-            result.push_back(nucleus::utils::generate_mipmapped_colour_texture(source, algorithm));
-        } else {
-            nucleus::utils::MipmappedColourTexture levels;
-            levels.emplace_back(source, algorithm);
-            result.push_back(std::move(levels));
+        if (encoder == BenchmarkItem::CpuEncoder::Goofy) {
+            const auto start = Clock::now();
+            if (mipmaps) {
+                result.textures.push_back(nucleus::utils::generate_mipmapped_colour_texture(source, algorithm));
+            } else {
+                nucleus::utils::MipmappedColourTexture levels;
+                levels.emplace_back(source, algorithm);
+                result.textures.push_back(std::move(levels));
+            }
+            result.encoding_ms += elapsed_ms(start);
+            for (const auto& level : result.textures.back())
+                result.transcoded_bytes += level.n_bytes();
+            continue;
         }
+
+        const nucleus::utils::BasisUniversalCompressionSettings settings {
+            .format = basis_format(encoder),
+            .target_format = algorithm,
+            .quality = basis_quality,
+            .effort = basis_effort,
+            .generate_mipmaps = mipmaps,
+        };
+        auto compressed = nucleus::utils::compress_with_basis_universal(source, settings);
+        if (!compressed)
+            return std::unexpected(QString::fromStdString(compressed.error()));
+        result.source_preparation_ms += compressed->timings.source_preparation_ms;
+        result.encoding_ms += compressed->timings.encoding_ms;
+        result.transcoding_ms += compressed->timings.transcoding_ms;
+        result.intermediate_bytes += compressed->intermediate_bytes;
+        result.transcoded_bytes += compressed->transcoded_bytes;
+        result.textures.push_back(std::move(compressed->texture));
     }
     return result;
 }
@@ -402,6 +479,9 @@ public:
         if (benchmark_item->m_request_serial == m_seen_serial)
             return;
         m_seen_serial = benchmark_item->m_request_serial;
+        m_cpu_encoder = benchmark_item->m_cpu_encoder;
+        m_basis_quality = benchmark_item->m_basis_quality;
+        m_basis_effort = benchmark_item->m_basis_effort;
         m_effort = benchmark_item->m_effort;
         m_mipmaps = benchmark_item->m_mipmaps;
         m_source_images = benchmark_item->m_source_images;
@@ -763,6 +843,17 @@ private:
             .generate_mipmaps = m_mipmaps,
             .timing_mode = gl_engine::TextureCompressor::TimingMode::EndToEnd,
         };
+        const auto compress_cpu = [&](std::span<const Raster> sources) {
+            return cpu_compress(sources, algorithm, m_mipmaps, m_cpu_encoder, m_basis_quality, m_basis_effort);
+        };
+        const auto compression_error = [](const QString& error) {
+            const QJsonObject root {
+                { QStringLiteral("supported"), false },
+                { QStringLiteral("error"), error },
+            };
+            return std::pair<QString, QString> { QStringLiteral("CPU compression failed: %1").arg(error),
+                QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)) };
+        };
         auto upload_cpu = [&](gl_engine::Texture& destination, const std::vector<nucleus::utils::MipmappedColourTexture>& compressed) {
             const auto start = Clock::now();
             for (size_t layer = 0; layer < compressed.size(); ++layer)
@@ -778,8 +869,10 @@ private:
             gl_engine::Texture cpu_quality_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
             cpu_quality_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
             cpu_quality_destination.allocate_array(resolution, resolution, unsigned(tile_groups.size()));
-            auto cpu_quality = cpu_compress(all_sources, algorithm, m_mipmaps);
-            static_cast<void>(upload_cpu(cpu_quality_destination, cpu_quality));
+            auto cpu_quality = compress_cpu(all_sources);
+            if (!cpu_quality)
+                return compression_error(cpu_quality.error());
+            static_cast<void>(upload_cpu(cpu_quality_destination, cpu_quality->textures));
 
             gl_engine::Texture gpu_quality_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
             gpu_quality_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
@@ -797,7 +890,7 @@ private:
             }
             cpu_psnr = linear_psnr(cpu_reconstructed, all_sources);
             gpu_psnr = linear_psnr(gpu_reconstructed, all_sources);
-            m_preview_source = preview_data_url(gpu_reconstructed);
+            m_preview_source = preview_data_url(cpu_reconstructed);
         }
 
         gl_engine::Texture cpu_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
@@ -811,8 +904,13 @@ private:
         m_gpu_timer = std::make_unique<gl_engine::TextureCompressor::GpuTimer>();
 
         std::vector<double> cpu_compression_times;
+        std::vector<double> cpu_source_preparation_times;
+        std::vector<double> cpu_encoding_times;
+        std::vector<double> cpu_transcoding_times;
         std::vector<double> cpu_upload_times;
         std::vector<double> cpu_total_times;
+        std::vector<double> cpu_intermediate_bytes;
+        std::vector<double> cpu_transcoded_bytes;
         WallTimingSamples gpu_upload_times;
         WallTimingSamples gpu_mipmap_times;
         WallTimingSamples gpu_compression_pass_times;
@@ -823,16 +921,23 @@ private:
         std::vector<double> gpu_total_times;
         std::vector<uint64_t> gpu_timing_tickets;
         cpu_compression_times.reserve(sample_count);
+        cpu_source_preparation_times.reserve(sample_count);
+        cpu_encoding_times.reserve(sample_count);
+        cpu_transcoding_times.reserve(sample_count);
         cpu_upload_times.reserve(sample_count);
         cpu_total_times.reserve(sample_count);
+        cpu_intermediate_bytes.reserve(sample_count);
+        cpu_transcoded_bytes.reserve(sample_count);
         gpu_total_times.reserve(sample_count);
 
         // Keep CPU and GPU phases separate: mobile CPU frequency and thermal state are shared
         // with the GPU, so interleaving them makes the CPU result workload-dependent.
         // Each backend warms up once on all four distinct batches.
         for (int group = 0; group < batches_per_round; ++group) {
-            auto compressed = cpu_compress(sources_for_group(group), algorithm, m_mipmaps);
-            static_cast<void>(upload_cpu(cpu_destination, compressed));
+            auto compressed = compress_cpu(sources_for_group(group));
+            if (!compressed)
+                return compression_error(compressed.error());
+            static_cast<void>(upload_cpu(cpu_destination, compressed->textures));
         }
         for (int group = 0; group < batches_per_round; ++group)
             static_cast<void>(gpu_compressor->compress(sources_for_group(group), *gpu_destination, layers, gpu_settings));
@@ -840,12 +945,19 @@ private:
         for (int round = 0; round < measurement_rounds; ++round) {
             for (int group = 0; group < batches_per_round; ++group) {
                 const auto cpu_start = Clock::now();
-                auto compressed = cpu_compress(sources_for_group(group), algorithm, m_mipmaps);
+                auto compressed = compress_cpu(sources_for_group(group));
+                if (!compressed)
+                    return compression_error(compressed.error());
                 const auto cpu_compression_time = elapsed_ms(cpu_start);
-                const auto cpu_upload_time = upload_cpu(cpu_destination, compressed);
+                const auto cpu_upload_time = upload_cpu(cpu_destination, compressed->textures);
                 cpu_compression_times.push_back(cpu_compression_time);
+                cpu_source_preparation_times.push_back(compressed->source_preparation_ms);
+                cpu_encoding_times.push_back(compressed->encoding_ms);
+                cpu_transcoding_times.push_back(compressed->transcoding_ms);
                 cpu_upload_times.push_back(cpu_upload_time);
                 cpu_total_times.push_back(elapsed_ms(cpu_start));
+                cpu_intermediate_bytes.push_back(double(compressed->intermediate_bytes));
+                cpu_transcoded_bytes.push_back(double(compressed->transcoded_bytes));
             }
         }
 
@@ -878,8 +990,13 @@ private:
         }
 
         const auto cpu_compression = statistics(cpu_compression_times);
+        const auto cpu_source_preparation = statistics(cpu_source_preparation_times);
+        const auto cpu_encoding = statistics(cpu_encoding_times);
+        const auto cpu_transcoding = statistics(cpu_transcoding_times);
         const auto cpu_upload = statistics(cpu_upload_times);
         const auto cpu_total = statistics(cpu_total_times);
+        const auto cpu_intermediate_size = statistics(cpu_intermediate_bytes);
+        const auto cpu_transcoded_size = statistics(cpu_transcoded_bytes);
         const auto gpu_upload = statistics(gpu_upload_times.total);
         const auto gpu_mipmap = statistics(gpu_mipmap_times.total);
         const auto gpu_compression_pass = statistics(gpu_compression_pass_times.total);
@@ -889,6 +1006,7 @@ private:
         const auto gpu_compressed_upload = statistics(gpu_compressed_upload_times.total);
         const auto gpu_total = statistics(gpu_total_times);
         const auto algorithm_name = algorithm == nucleus::utils::ColourTexture::Format::DXT1 ? QStringLiteral("DXT1 / BC1") : QStringLiteral("ETC1 in ETC2");
+        const auto cpu_backend_name = cpu_encoder_name(m_cpu_encoder);
 
         QJsonObject root {
             { QStringLiteral("renderer"), gl_string(GL_RENDERER) },
@@ -896,6 +1014,7 @@ private:
             { QStringLiteral("version"), gl_string(GL_VERSION) },
             { QStringLiteral("supported"), true },
             { QStringLiteral("algorithm"), algorithm_name },
+            { QStringLiteral("cpu_backend"), cpu_backend_name },
             { QStringLiteral("gpu_backend"), backend_name },
             { QStringLiteral("timing_method"), QStringLiteral("wall time; one final glFinish per end-to-end sample") },
             { QStringLiteral("resolution"), int(resolution) },
@@ -905,12 +1024,19 @@ private:
             { QStringLiteral("measurement_samples"), sample_count },
             { QStringLiteral("warmup_rounds"), 1 },
             { QStringLiteral("gpu_stage_profile_samples"), sample_count },
-            { QStringLiteral("effort"), m_effort },
+            { QStringLiteral("basis_quality"), m_basis_quality },
+            { QStringLiteral("basis_effort"), m_basis_effort },
+            { QStringLiteral("gpu_effort"), m_effort },
             { QStringLiteral("mipmaps"), m_mipmaps },
             { QStringLiteral("dataset"), dataset_json() },
             { QStringLiteral("cpu_psnr_db_all_16_images"), cpu_psnr },
             { QStringLiteral("gpu_psnr_db_all_16_images"), gpu_psnr },
             { QStringLiteral("cpu_compression"), to_json(cpu_compression) },
+            { QStringLiteral("cpu_source_preparation"), to_json(cpu_source_preparation) },
+            { QStringLiteral("cpu_encoding"), to_json(cpu_encoding) },
+            { QStringLiteral("cpu_transcoding"), to_json(cpu_transcoding) },
+            { QStringLiteral("cpu_intermediate_size"), size_to_json(cpu_intermediate_size) },
+            { QStringLiteral("cpu_transcoded_size"), size_to_json(cpu_transcoded_size) },
             { QStringLiteral("cpu_compressed_upload"), to_json(cpu_upload) },
             { QStringLiteral("cpu_end_to_end"), to_json(cpu_total) },
             { QStringLiteral("gpu_scratch_upload"), to_json(gpu_upload) },
@@ -949,6 +1075,11 @@ private:
             { QStringLiteral("raw_samples_ms"),
                 QJsonObject {
                     { QStringLiteral("cpu_compression"), samples_to_json(cpu_compression_times) },
+                    { QStringLiteral("cpu_source_preparation"), samples_to_json(cpu_source_preparation_times) },
+                    { QStringLiteral("cpu_encoding"), samples_to_json(cpu_encoding_times) },
+                    { QStringLiteral("cpu_transcoding"), samples_to_json(cpu_transcoding_times) },
+                    { QStringLiteral("cpu_intermediate_bytes"), samples_to_json(cpu_intermediate_bytes) },
+                    { QStringLiteral("cpu_transcoded_bytes"), samples_to_json(cpu_transcoded_bytes) },
                     { QStringLiteral("cpu_compressed_upload"), samples_to_json(cpu_upload_times) },
                     { QStringLiteral("cpu_end_to_end"), samples_to_json(cpu_total_times) },
                     { QStringLiteral("gpu_end_to_end"), samples_to_json(gpu_total_times) },
@@ -964,14 +1095,24 @@ private:
         const auto line = [](QString label, Statistics value) {
             return QStringLiteral("%1  median %2 ms   p95 %3 ms").arg(label, -26).arg(value.median, 8, 'f', 3).arg(value.p95, 8, 'f', 3);
         };
+        const auto size_line = [](QString label, Statistics value) {
+            return QStringLiteral("%1  median %2 KiB  p95 %3 KiB")
+                .arg(label, -26)
+                .arg(value.median / 1024.0, 8, 'f', 1)
+                .arg(value.p95 / 1024.0, 8, 'f', 1);
+        };
+        const auto cpu_settings = m_cpu_encoder == BenchmarkItem::CpuEncoder::Goofy
+            ? QStringLiteral("CPU: %1").arg(cpu_backend_name)
+            : QStringLiteral("CPU: %1, quality %2, effort %3").arg(cpu_backend_name).arg(m_basis_quality).arg(m_basis_effort);
         QStringList summary {
-            QStringLiteral("%1 — %2 × %3, batch %4, 12 samples, effort %5, mipmaps %6")
+            QStringLiteral("%1 — %2 × %3, batch %4, 12 samples, GPU effort %5, mipmaps %6")
                 .arg(algorithm_name)
                 .arg(resolution)
                 .arg(resolution)
                 .arg(batch_size)
                 .arg(m_effort)
                 .arg(m_mipmaps ? QStringLiteral("on") : QStringLiteral("off")),
+            cpu_settings,
             backend_name,
             gl_string(GL_RENDERER),
             QStringLiteral("Quality first: one untimed 16-image pass"),
@@ -981,6 +1122,11 @@ private:
             QStringLiteral("Timing: one final glFinish per end-to-end sample"),
             QString(),
             line(QStringLiteral("CPU compression"), cpu_compression),
+            line(QStringLiteral("  source preparation"), cpu_source_preparation),
+            line(QStringLiteral("  CPU encoding"), cpu_encoding),
+            line(QStringLiteral("  CPU transcoding"), cpu_transcoding),
+            size_line(QStringLiteral("  Intermediate stream"), cpu_intermediate_size),
+            size_line(QStringLiteral("  GPU blocks"), cpu_transcoded_size),
             line(QStringLiteral("CPU compressed upload"), cpu_upload),
             line(QStringLiteral("CPU end-to-end"), cpu_total),
             QStringLiteral("GPU stages (separate serialised profiling pass)"),
@@ -1047,6 +1193,9 @@ private:
     QPointer<BenchmarkItem> m_item;
     QQuickWindow* m_window = nullptr;
     unsigned m_seen_serial = 0;
+    BenchmarkItem::CpuEncoder m_cpu_encoder = BenchmarkItem::CpuEncoder::Goofy;
+    int m_basis_quality = 75;
+    int m_basis_effort = 4;
     int m_effort = 4;
     bool m_mipmaps = true;
     bool m_pending = false;
@@ -1064,6 +1213,35 @@ BenchmarkItem::BenchmarkItem(QQuickItem* parent)
 }
 
 QQuickFramebufferObject::Renderer* BenchmarkItem::createRenderer() const { return new BenchmarkRenderer; }
+
+BenchmarkItem::CpuEncoder BenchmarkItem::cpuEncoder() const { return m_cpu_encoder; }
+void BenchmarkItem::setCpuEncoder(CpuEncoder value)
+{
+    if (m_cpu_encoder == value)
+        return;
+    m_cpu_encoder = value;
+    emit cpuEncoderChanged();
+}
+
+int BenchmarkItem::basisQuality() const { return m_basis_quality; }
+void BenchmarkItem::setBasisQuality(int value)
+{
+    value = std::clamp(value, 1, 100);
+    if (m_basis_quality == value)
+        return;
+    m_basis_quality = value;
+    emit basisQualityChanged();
+}
+
+int BenchmarkItem::basisEffort() const { return m_basis_effort; }
+void BenchmarkItem::setBasisEffort(int value)
+{
+    value = std::clamp(value, 0, 10);
+    if (m_basis_effort == value)
+        return;
+    m_basis_effort = value;
+    emit basisEffortChanged();
+}
 
 int BenchmarkItem::effort() const { return m_effort; }
 void BenchmarkItem::setEffort(int value)

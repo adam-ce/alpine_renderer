@@ -24,6 +24,7 @@
 #include <array>
 #include <cstdint>
 #include <stdexcept>
+#include <utility>
 
 #define GOOFYTC_IMPLEMENTATION
 #include <GoofyTC/goofy_tc.h>
@@ -155,6 +156,14 @@ nucleus::utils::ColourTexture::ColourTexture(const radix::Raster<glm::u8vec4>& i
     : m_data(to_compressed(image, format))
     , m_width(unsigned(image.width()))
     , m_height(unsigned(image.height()))
+    , m_format(format)
+{
+}
+
+nucleus::utils::ColourTexture::ColourTexture(std::vector<uint8_t> data, unsigned width, unsigned height, Format format)
+    : m_data(std::move(data))
+    , m_width(width)
+    , m_height(height)
     , m_format(format)
 {
 }
