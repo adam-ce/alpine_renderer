@@ -715,7 +715,7 @@ struct gl_engine::TextureCompressor::Impl {
         f->glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &maximum_renderbuffer_size);
         f->glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum_texture_size);
         const auto atlas_size = [](size_t pixels, GLint maximum_dimension) {
-            const auto atlas_width = GLsizei(std::min(pixels, size_t(maximum_dimension)));
+            const auto atlas_width = GLsizei(std::min({ pixels, size_t(maximum_dimension), size_t(256) }));
             const auto atlas_height = GLsizei((pixels + size_t(atlas_width) - 1) / size_t(atlas_width));
             Q_ASSERT(atlas_width > 0 && atlas_height > 0 && atlas_height <= maximum_dimension);
             return std::pair(atlas_width, atlas_height);
