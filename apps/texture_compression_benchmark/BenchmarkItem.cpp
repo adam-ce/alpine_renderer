@@ -783,6 +783,8 @@ private:
             m_pending_gpu_report->summary.push_back(QString());
             m_pending_gpu_report->summary.push_back(QStringLiteral("Actual GPU time (timer query)"));
             m_pending_gpu_report->summary.push_back(
+                QStringLiteral("Mipmap generation           median %1 ms").arg(statistics(mipmap_generation).median, 8, 'f', 3));
+            m_pending_gpu_report->summary.push_back(
                 QStringLiteral("Compression pass            median %1 ms").arg(statistics(compression_pass).median, 8, 'f', 3));
             m_pending_gpu_report->summary.push_back(
                 QStringLiteral("Packing pass                median %1 ms").arg(statistics(packing_pass).median, 8, 'f', 3));
