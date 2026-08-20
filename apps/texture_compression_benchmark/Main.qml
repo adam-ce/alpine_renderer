@@ -144,7 +144,8 @@ ApplicationWindow {
                             Layout.preferredWidth: 260
                             model: [
                                 qsTr("Search (reference)"),
-                                qsTr("Fast range (Goofy-inspired)")
+                                qsTr("Fast range (Goofy-inspired)"),
+                                qsTr("Fast split (two sub-blocks)")
                             ]
                             currentIndex: benchmark.gpuEncoder
                             enabled: !benchmark.running

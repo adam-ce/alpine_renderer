@@ -836,16 +836,25 @@ private:
         }
 
         const auto algorithm = gl_engine::Texture::compression_algorithm();
-        const auto backend_name = m_gpu_encoder == BenchmarkItem::GpuEncoder::FastRange
-            ? QStringLiteral("Fragment shader fast range + PBO")
-            : QStringLiteral("Fragment shader search + PBO");
+        const auto backend_name = [this]() {
+            switch (m_gpu_encoder) {
+            case BenchmarkItem::GpuEncoder::FastRange:
+                return QStringLiteral("Fragment shader fast range + PBO");
+            case BenchmarkItem::GpuEncoder::FastSplit:
+                return QStringLiteral("Fragment shader fast split + PBO");
+            case BenchmarkItem::GpuEncoder::Search:
+                return QStringLiteral("Fragment shader search + PBO");
+            }
+            return QStringLiteral("Fragment shader search + PBO");
+        }();
         const auto filter = m_mipmaps ? gl_engine::Texture::Filter::MipMapLinear : gl_engine::Texture::Filter::Linear;
         const gl_engine::TextureCompressor::Settings gpu_settings {
             .algorithm = algorithm,
             .effort = unsigned(m_effort),
             .encoder = m_gpu_encoder == BenchmarkItem::GpuEncoder::FastRange
                 ? gl_engine::TextureCompressor::Encoder::FastRange
-                : gl_engine::TextureCompressor::Encoder::Search,
+                : m_gpu_encoder == BenchmarkItem::GpuEncoder::FastSplit ? gl_engine::TextureCompressor::Encoder::FastSplit
+                                                                        : gl_engine::TextureCompressor::Encoder::Search,
             .generate_mipmaps = m_mipmaps,
             .timing_mode = gl_engine::TextureCompressor::TimingMode::EndToEnd,
         };
@@ -1203,7 +1212,7 @@ private:
     BenchmarkItem::CpuEncoder m_cpu_encoder = BenchmarkItem::CpuEncoder::Goofy;
     int m_basis_quality = 75;
     int m_basis_effort = 4;
-    BenchmarkItem::GpuEncoder m_gpu_encoder = BenchmarkItem::GpuEncoder::FastRange;
+    BenchmarkItem::GpuEncoder m_gpu_encoder = BenchmarkItem::GpuEncoder::FastSplit;
     int m_effort = 4;
     bool m_mipmaps = true;
     bool m_pending = false;

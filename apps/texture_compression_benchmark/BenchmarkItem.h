@@ -33,7 +33,7 @@ class BenchmarkItem : public QQuickFramebufferObject {
 public:
     enum class CpuEncoder { Goofy, BasisEtc1s, BasisUastcLdr4x4, BasisXuastcLdr4x4 };
     Q_ENUM(CpuEncoder)
-    enum class GpuEncoder { Search, FastRange };
+    enum class GpuEncoder { Search, FastRange, FastSplit };
     Q_ENUM(GpuEncoder)
 
     explicit BenchmarkItem(QQuickItem* parent = nullptr);
@@ -84,7 +84,7 @@ private:
     CpuEncoder m_cpu_encoder = CpuEncoder::Goofy;
     int m_basis_quality = 75;
     int m_basis_effort = 4;
-    GpuEncoder m_gpu_encoder = GpuEncoder::FastRange;
+    GpuEncoder m_gpu_encoder = GpuEncoder::FastSplit;
     int m_effort = 4;
     bool m_mipmaps = true;
     bool m_data_ready = false;

@@ -93,7 +93,7 @@ private:
 class TextureCompressor {
 public:
     enum class TimingMode { EndToEnd, IndividualStages, SubmissionOnly };
-    enum class Encoder { Search, FastRange };
+    enum class Encoder { Search, FastRange, FastSplit };
 
     struct GpuTimings {
         double scratch_upload_ms = 0.0;

@@ -173,6 +173,109 @@ highp uvec2 encode_etc1_fast(highp uvec3 pixels[16])
     return uvec2(header, byte_swap(indices));
 }
 
+struct FastEtc1Subblock {
+    highp ivec3 colour;
+    highp int table;
+    highp int middle;
+    highp int threshold;
+};
+
+struct FastEtc1Block {
+    highp uvec2 encoded;
+    highp uint error;
+};
+
+FastEtc1Subblock fast_subblock_parameters(highp uvec3 pixels[16], bool flip, highp int subblock)
+{
+    highp uvec3 minimum_colour = uvec3(255u);
+    highp uvec3 maximum_colour = uvec3(0u);
+    highp uvec3 sum = uvec3(0u);
+    for (int i = 0; i < 16; ++i) {
+        highp int x = i & 3;
+        highp int y = i >> 2;
+        bool belongs_to_first = flip ? y < 2 : x < 2;
+        if (belongs_to_first != (subblock == 0))
+            continue;
+        minimum_colour = min(minimum_colour, pixels[i]);
+        maximum_colour = max(maximum_colour, pixels[i]);
+        sum += pixels[i];
+    }
+
+    highp int minimum_brightness = brightness(minimum_colour);
+    highp int maximum_brightness = brightness(maximum_colour);
+    highp int range = max(8, maximum_brightness - minimum_brightness);
+    highp int middle = (minimum_brightness + maximum_brightness + 1) / 2;
+    highp ivec3 average = ivec3((sum + 4u) / 8u);
+    highp int correction = middle - brightness(uvec3(average));
+    highp ivec3 colour = clamp(average + ivec3(correction), ivec3(0), ivec3(255));
+    return FastEtc1Subblock(colour, table_for_range(range), middle, (range * 3 + 4) / 8);
+}
+
+FastEtc1Block encode_etc1_split_orientation(highp uvec3 pixels[16], bool flip)
+{
+    FastEtc1Subblock first = fast_subblock_parameters(pixels, flip, 0);
+    FastEtc1Subblock second = fast_subblock_parameters(pixels, flip, 1);
+    highp uvec3 first_base5 = (uvec3(first.colour) * 31u + 127u) / 255u;
+    highp uvec3 second_base5 = (uvec3(second.colour) * 31u + 127u) / 255u;
+    highp ivec3 base_delta = ivec3(second_base5) - ivec3(first_base5);
+    bool differential = all(greaterThanEqual(base_delta, ivec3(-4))) && all(lessThanEqual(base_delta, ivec3(3)));
+
+    highp uint header;
+    highp ivec3 first_decoded;
+    highp ivec3 second_decoded;
+    if (differential) {
+        highp uvec3 delta3 = uvec3(base_delta) & 7u;
+        header = first_base5.r << 3u | delta3.r
+            | first_base5.g << 11u | delta3.g << 8u
+            | first_base5.b << 19u | delta3.b << 16u;
+        first_decoded = ivec3((first_base5 << 3u) | (first_base5 >> 2u));
+        second_decoded = ivec3((second_base5 << 3u) | (second_base5 >> 2u));
+    } else {
+        highp uvec3 first_base4 = (uvec3(first.colour) * 15u + 127u) / 255u;
+        highp uvec3 second_base4 = (uvec3(second.colour) * 15u + 127u) / 255u;
+        header = first_base4.r << 4u | second_base4.r
+            | first_base4.g << 12u | second_base4.g << 8u
+            | first_base4.b << 20u | second_base4.b << 16u;
+        first_decoded = ivec3((first_base4 << 4u) | first_base4);
+        second_decoded = ivec3((second_base4 << 4u) | second_base4);
+    }
+
+    highp uint indices = 0u;
+    highp uint total_error = 0u;
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            highp int pixel_index = y * 4 + x;
+            bool use_second = flip ? y >= 2 : x >= 2;
+            highp int middle = use_second ? second.middle : first.middle;
+            highp int threshold = use_second ? second.threshold : first.threshold;
+            highp int table = use_second ? second.table : first.table;
+            highp ivec3 decoded = use_second ? second_decoded : first_decoded;
+            highp int brightness_delta = brightness(pixels[pixel_index]) - middle;
+            highp uint selected = uint(abs(brightness_delta) >= threshold);
+            if (brightness_delta < 0)
+                selected += 2u;
+
+            highp ivec3 reconstructed = clamp(decoded + ivec3(modifier(table, int(selected))), ivec3(0), ivec3(255));
+            highp ivec3 colour_delta = ivec3(pixels[pixel_index]) - reconstructed;
+            total_error += uint(colour_delta.x * colour_delta.x + colour_delta.y * colour_delta.y + colour_delta.z * colour_delta.z);
+            highp uint bit_position = uint(x * 4 + y);
+            indices |= (selected & 1u) << bit_position;
+            indices |= (selected >> 1u) << (bit_position + 16u);
+        }
+    }
+
+    highp uint control = uint(first.table) << 5u | uint(second.table) << 2u
+        | (differential ? 2u : 0u) | (flip ? 1u : 0u);
+    return FastEtc1Block(uvec2(header | control << 24u, byte_swap(indices)), total_error);
+}
+
+highp uvec2 encode_etc1_fast_split(highp uvec3 pixels[16])
+{
+    FastEtc1Block vertical = encode_etc1_split_orientation(pixels, false);
+    FastEtc1Block horizontal = encode_etc1_split_orientation(pixels, true);
+    return horizontal.error < vertical.error ? horizontal.encoded : vertical.encoded;
+}
+
 highp uvec2 encode_etc1(highp uvec3 pixels[16])
 {
     highp uvec3 sum = uvec3(0u);
@@ -246,7 +349,9 @@ highp uvec2 compress_block(highp ivec2 block,
     }
 
 #ifdef ALP_COMPRESS_ETC1
-#ifdef ALP_COMPRESS_ETC1_FAST
+#ifdef ALP_COMPRESS_ETC1_SPLIT
+    return encode_etc1_fast_split(pixels);
+#elif defined(ALP_COMPRESS_ETC1_FAST)
     return encode_etc1_fast(pixels);
 #else
     return encode_etc1(pixels);
