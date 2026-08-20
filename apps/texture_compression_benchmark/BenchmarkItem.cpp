@@ -41,6 +41,7 @@
 #include <nucleus/tile/conversion.h>
 #include <nucleus/utils/BasisUniversalTextureCompression.h>
 #include <nucleus/utils/ColourTexture.h>
+#include <nucleus/utils/image_loader.h>
 #if defined(__EMSCRIPTEN__)
 #include <webgl/webgl2.h>
 #endif
@@ -1459,10 +1460,9 @@ void BenchmarkItem::downloadBenchmarkData()
                 auto* reply = m_network_manager->get(QNetworkRequest(QUrl(url)));
                 connect(reply, &QNetworkReply::finished, this, [this, reply, tile_index, url]() {
                     if (reply->error() == QNetworkReply::NoError) {
-                        QImage image;
-                        image.loadFromData(reply->readAll(), "JPEG");
-                        if (!image.isNull() && image.size() == QSize(256, 256))
-                            m_downloaded_tiles[tile_index] = image.convertToFormat(QImage::Format_RGBA8888);
+                        const auto image = nucleus::utils::image_loader::rgba8(reply->readAll());
+                        if (image && image->size() == glm::uvec2(256u))
+                            m_downloaded_tiles[tile_index] = nucleus::tile::conversion::to_QImage(*image);
                     }
                     if (m_downloaded_tiles[tile_index].isNull() && !m_data_status.startsWith(QStringLiteral("Unable"))) {
                         m_data_status = QStringLiteral("Unable to download benchmark tile: %1").arg(url);

@@ -16,6 +16,9 @@ set(BASISU_ZSTD OFF CACHE BOOL "" FORCE)
 set(BASISU_OPENCL OFF CACHE BOOL "" FORCE)
 set(BASISU_DISABLE_ANDROID_ASTC_DECOMP ON CACHE BOOL "" FORCE)
 add_subdirectory("${basisu_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/basisu" EXCLUDE_FROM_ALL)
+if (EMSCRIPTEN AND ALP_ENABLE_THREADING)
+    target_compile_options(basisu_encoder PRIVATE -pthread)
+endif()
 
 add_library(alp_basisu_texture_compression STATIC
     ${CMAKE_SOURCE_DIR}/nucleus/utils/BasisUniversalTextureCompression.h
