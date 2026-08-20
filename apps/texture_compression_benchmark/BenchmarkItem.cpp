@@ -842,6 +842,10 @@ private:
                 return QStringLiteral("Fragment shader fast range + PBO");
             case BenchmarkItem::GpuEncoder::FastSplit:
                 return QStringLiteral("Fragment shader fast split + PBO");
+            case BenchmarkItem::GpuEncoder::FastSplitFused:
+                return QStringLiteral("Fragment shader fast split fused + PBO");
+            case BenchmarkItem::GpuEncoder::FastSplitBounds:
+                return QStringLiteral("Fragment shader fast split bounds + PBO");
             case BenchmarkItem::GpuEncoder::Search:
                 return QStringLiteral("Fragment shader search + PBO");
             }
@@ -854,7 +858,9 @@ private:
             .encoder = m_gpu_encoder == BenchmarkItem::GpuEncoder::FastRange
                 ? gl_engine::TextureCompressor::Encoder::FastRange
                 : m_gpu_encoder == BenchmarkItem::GpuEncoder::FastSplit ? gl_engine::TextureCompressor::Encoder::FastSplit
-                                                                        : gl_engine::TextureCompressor::Encoder::Search,
+                : m_gpu_encoder == BenchmarkItem::GpuEncoder::FastSplitFused ? gl_engine::TextureCompressor::Encoder::FastSplitFused
+                : m_gpu_encoder == BenchmarkItem::GpuEncoder::FastSplitBounds ? gl_engine::TextureCompressor::Encoder::FastSplitBounds
+                                                                              : gl_engine::TextureCompressor::Encoder::Search,
             .generate_mipmaps = m_mipmaps,
             .timing_mode = gl_engine::TextureCompressor::TimingMode::EndToEnd,
         };
@@ -1212,7 +1218,7 @@ private:
     BenchmarkItem::CpuEncoder m_cpu_encoder = BenchmarkItem::CpuEncoder::Goofy;
     int m_basis_quality = 75;
     int m_basis_effort = 4;
-    BenchmarkItem::GpuEncoder m_gpu_encoder = BenchmarkItem::GpuEncoder::FastSplit;
+    BenchmarkItem::GpuEncoder m_gpu_encoder = BenchmarkItem::GpuEncoder::FastSplitFused;
     int m_effort = 4;
     bool m_mipmaps = true;
     bool m_pending = false;

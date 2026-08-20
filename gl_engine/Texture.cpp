@@ -695,6 +695,8 @@ struct gl_engine::TextureCompressor::Impl {
     std::unique_ptr<ShaderProgram> etc1_fragment_program;
     std::unique_ptr<ShaderProgram> etc1_fast_fragment_program;
     std::unique_ptr<ShaderProgram> etc1_fast_split_fragment_program;
+    std::unique_ptr<ShaderProgram> etc1_fast_split_fused_fragment_program;
+    std::unique_ptr<ShaderProgram> etc1_fast_split_bounds_fragment_program;
     std::unique_ptr<ShaderProgram> packing_program;
 
     Impl(unsigned texture_width, unsigned texture_height, unsigned maximum_batch_size)
@@ -785,6 +787,14 @@ struct gl_engine::TextureCompressor::Impl {
             "texture_compress.vert",
             ShaderCodeSource::FILE,
             std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1"), QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT") });
+        etc1_fast_split_fused_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
+            "texture_compress.vert",
+            ShaderCodeSource::FILE,
+            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1"), QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED") });
+        etc1_fast_split_bounds_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
+            "texture_compress.vert",
+            ShaderCodeSource::FILE,
+            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1"), QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_BOUNDS") });
         packing_program = std::make_unique<ShaderProgram>(
             "texture_compress_raster.vert", "texture_compress_pack.frag", ShaderCodeSource::FILE);
 
@@ -796,6 +806,8 @@ struct gl_engine::TextureCompressor::Impl {
         etc1_fragment_program.reset();
         etc1_fast_fragment_program.reset();
         etc1_fast_split_fragment_program.reset();
+        etc1_fast_split_fused_fragment_program.reset();
+        etc1_fast_split_bounds_fragment_program.reset();
         packing_program.reset();
         if (!QOpenGLContext::currentContext())
             return;
@@ -964,6 +976,10 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
                 program = m->etc1_fast_fragment_program.get();
             else if (settings.encoder == Encoder::FastSplit)
                 program = m->etc1_fast_split_fragment_program.get();
+            else if (settings.encoder == Encoder::FastSplitFused)
+                program = m->etc1_fast_split_fused_fragment_program.get();
+            else if (settings.encoder == Encoder::FastSplitBounds)
+                program = m->etc1_fast_split_bounds_fragment_program.get();
             else
                 program = m->etc1_fragment_program.get();
         }

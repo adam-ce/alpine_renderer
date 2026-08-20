@@ -145,7 +145,9 @@ ApplicationWindow {
                             model: [
                                 qsTr("Search (reference)"),
                                 qsTr("Fast range (Goofy-inspired)"),
-                                qsTr("Fast split (two sub-blocks)")
+                                qsTr("Fast split (two sub-blocks)"),
+                                qsTr("Fast split fused"),
+                                qsTr("Fast split bounds")
                             ]
                             currentIndex: benchmark.gpuEncoder
                             enabled: !benchmark.running
