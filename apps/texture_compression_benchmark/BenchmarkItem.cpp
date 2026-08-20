@@ -324,6 +324,9 @@ constexpr std::array<BenchmarkItem::GpuEncoder, 5> gpu_encoders {
     BenchmarkItem::GpuEncoder::FastSplitFused,
     BenchmarkItem::GpuEncoder::FastSplitBounds,
 };
+constexpr size_t uncompressed_preview_index = 0;
+constexpr size_t cpu_preview_index = 1;
+constexpr size_t first_gpu_preview_index = 2;
 
 QString gpu_encoder_name(BenchmarkItem::GpuEncoder encoder, int effort)
 {
@@ -566,13 +569,19 @@ private:
                 uniform lowp sampler2DArray texture_sampler;
                 in highp vec2 texcoords;
                 out lowp vec4 out_color;
+                highp vec3 linear_to_srgb(highp vec3 linear) {
+                    return mix(12.92 * linear,
+                        1.055 * pow(linear, vec3(1.0 / 2.4)) - 0.055,
+                        step(vec3(0.0031308), linear));
+                }
                 void main() {
                     highp vec2 grid_position = texcoords * 4.0;
                     highp ivec2 cell = min(ivec2(grid_position), ivec2(3));
                     highp float layer = float((3 - cell.y) * 4 + cell.x);
                     highp vec2 tile_coordinates = fract(grid_position);
-                    out_color = textureLod(texture_sampler,
+                    highp vec4 linear_color = textureLod(texture_sampler,
                         vec3(tile_coordinates.x, 1.0 - tile_coordinates.y, layer), 0.0);
+                    out_color = vec4(linear_to_srgb(linear_color.rgb), linear_color.a);
                 })",
                 gl_engine::ShaderCodeSource::PLAINTEXT);
             m_preview_geometry = gl_engine::helpers::create_screen_quad_geometry();
@@ -938,26 +947,38 @@ private:
         double gpu_psnr = 0.0;
         {
             m_preview_results.clear();
-            m_preview_results.reserve(1 + gpu_encoders.size());
-            m_preview_textures[0] = std::make_unique<gl_engine::Texture>(
+            m_preview_results.reserve(first_gpu_preview_index + gpu_encoders.size());
+
+            m_preview_textures[uncompressed_preview_index] = std::make_unique<gl_engine::Texture>(
+                gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::SRGBA8);
+            m_preview_textures[uncompressed_preview_index]->setParams(
+                gl_engine::Texture::Filter::Linear, gl_engine::Texture::Filter::Linear);
+            m_preview_textures[uncompressed_preview_index]->allocate_array(
+                resolution, resolution, unsigned(tile_groups.size()));
+            for (size_t layer = 0; layer < all_sources.size(); ++layer)
+                m_preview_textures[uncompressed_preview_index]->upload(all_sources[layer], unsigned(layer));
+            m_preview_results.push_back(
+                { QStringLiteral("Uncompressed reference"), std::numeric_limits<double>::infinity(), -1.0 });
+
+            m_preview_textures[cpu_preview_index] = std::make_unique<gl_engine::Texture>(
                 gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
-            m_preview_textures[0]->setParams(filter, gl_engine::Texture::Filter::Linear);
-            m_preview_textures[0]->allocate_array(resolution, resolution, unsigned(tile_groups.size()));
+            m_preview_textures[cpu_preview_index]->setParams(filter, gl_engine::Texture::Filter::Linear);
+            m_preview_textures[cpu_preview_index]->allocate_array(resolution, resolution, unsigned(tile_groups.size()));
             auto cpu_quality = compress_cpu(all_sources);
             if (!cpu_quality)
                 return compression_error(cpu_quality.error());
-            static_cast<void>(upload_cpu(*m_preview_textures[0], cpu_quality->textures));
+            static_cast<void>(upload_cpu(*m_preview_textures[cpu_preview_index], cpu_quality->textures));
 
             std::vector<QImage> cpu_reconstructed;
             cpu_reconstructed.reserve(all_sources.size());
             for (unsigned layer = 0; layer < all_sources.size(); ++layer)
-                cpu_reconstructed.push_back(reconstruct(*m_preview_textures[0], resolution, layer));
+                cpu_reconstructed.push_back(reconstruct(*m_preview_textures[cpu_preview_index], resolution, layer));
             cpu_psnr = linear_psnr(cpu_reconstructed, all_sources);
             m_preview_results.push_back({ QStringLiteral("CPU %1").arg(cpu_encoder_name(m_cpu_encoder)), cpu_psnr, 0.0 });
 
             for (size_t encoder_index = 0; encoder_index < gpu_encoders.size(); ++encoder_index) {
                 const auto encoder = gpu_encoders[encoder_index];
-                auto& preview_texture = m_preview_textures[encoder_index + 1];
+                auto& preview_texture = m_preview_textures[encoder_index + first_gpu_preview_index];
                 preview_texture = std::make_unique<gl_engine::Texture>(
                     gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
                 preview_texture->setParams(filter, gl_engine::Texture::Filter::Linear);
@@ -1061,7 +1082,7 @@ private:
                     encoder_times.push_back(gpu.timings.total_ms);
                 }
             }
-            m_preview_results[encoder_index + 1].compression_time_ms = statistics(encoder_times).median;
+            m_preview_results[encoder_index + first_gpu_preview_index].compression_time_ms = statistics(encoder_times).median;
             if (encoder == m_gpu_encoder) {
                 gpu_total_times = std::move(encoder_times);
                 gpu_destination = std::move(destination);
@@ -1107,7 +1128,7 @@ private:
         const auto gpu_output_transfer = statistics(gpu_output_transfer_times.total);
         const auto gpu_compressed_upload = statistics(gpu_compressed_upload_times.total);
         const auto gpu_total = statistics(gpu_total_times);
-        m_preview_results[0].compression_time_ms = cpu_total.median;
+        m_preview_results[cpu_preview_index].compression_time_ms = cpu_total.median;
         const auto algorithm_name = algorithm == nucleus::utils::ColourTexture::Format::DXT1 ? QStringLiteral("DXT1 / BC1") : QStringLiteral("ETC1 in ETC2");
         const auto cpu_backend_name = cpu_encoder_name(m_cpu_encoder);
 
@@ -1307,7 +1328,7 @@ private:
     bool m_pending = false;
     std::vector<QImage> m_source_images;
     std::vector<BenchmarkItem::PreviewResult> m_preview_results;
-    std::array<std::unique_ptr<gl_engine::Texture>, 1 + gpu_encoders.size()> m_preview_textures;
+    std::array<std::unique_ptr<gl_engine::Texture>, first_gpu_preview_index + gpu_encoders.size()> m_preview_textures;
     std::unique_ptr<gl_engine::ShaderProgram> m_preview_shader;
     gl_engine::helpers::ScreenQuadGeometry m_preview_geometry;
     std::unique_ptr<gl_engine::TextureCompressor::GpuTimer> m_gpu_timer;

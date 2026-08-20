@@ -313,16 +313,28 @@ ApplicationWindow {
                             }
                         }
 
-                        Frame {
+                        Rectangle {
                             anchors.left: parent.left
                             anchors.top: parent.top
                             anchors.margins: 8
+                            implicitWidth: previewDetails.implicitWidth + 24
+                            implicitHeight: previewDetails.implicitHeight + 24
+                            color: Qt.rgba(1, 1, 1, 0.8)
+                            radius: 4
 
                             Label {
-                                text: qsTr("%1\nPSNR: %2 dB\nCompleted compression: %3 ms")
-                                    .arg(benchmark.previewName)
-                                    .arg(benchmark.previewPsnr.toFixed(2))
-                                    .arg(benchmark.previewCompressionTime.toFixed(3))
+                                id: previewDetails
+
+                                readonly property bool showingReference: benchmark.previewCompressionTime < 0
+
+                                anchors.fill: parent
+                                anchors.margins: 12
+                                text: showingReference
+                                    ? qsTr("%1\nPSNR: ∞\nCompression: N/A").arg(benchmark.previewName)
+                                    : qsTr("%1\nPSNR: %2 dB\nCompleted compression: %3 ms")
+                                        .arg(benchmark.previewName)
+                                        .arg(benchmark.previewPsnr.toFixed(2))
+                                        .arg(benchmark.previewCompressionTime.toFixed(3))
                             }
                         }
                     }
