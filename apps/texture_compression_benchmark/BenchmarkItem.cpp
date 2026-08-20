@@ -6,7 +6,6 @@
 
 #include "BenchmarkItem.h"
 
-#include <QBuffer>
 #include <QClipboard>
 #include <QGuiApplication>
 #include <QImage>
@@ -294,44 +293,6 @@ QImage reconstruct(gl_engine::Texture& texture, unsigned resolution, unsigned la
     return result;
 }
 
-QString preview_data_url(std::span<const QImage> images)
-{
-    constexpr int columns = 4;
-    constexpr int tile_size = 512;
-    static const auto linear_to_srgb = [] {
-        std::array<uint8_t, 256> result {};
-        for (size_t i = 0; i < result.size(); ++i) {
-            const auto linear = double(i) / 255.0;
-            const auto srgb = linear <= 0.0031308 ? 12.92 * linear : 1.055 * std::pow(linear, 1.0 / 2.4) - 0.055;
-            result[i] = uint8_t(std::lround(std::clamp(srgb, 0.0, 1.0) * 255.0));
-        }
-        return result;
-    }();
-    QImage preview(columns * tile_size, columns * tile_size, QImage::Format_RGBA8888);
-    preview.fill(Qt::black);
-    QPainter painter(&preview);
-    for (size_t i = 0; i < images.size(); ++i) {
-        auto srgb_image = images[i].convertToFormat(QImage::Format_RGBA8888);
-        for (int y = 0; y < srgb_image.height(); ++y) {
-            auto* scanline = srgb_image.scanLine(y);
-            for (int x = 0; x < srgb_image.width(); ++x) {
-                auto* pixel = scanline + x * 4;
-                pixel[0] = linear_to_srgb[pixel[0]];
-                pixel[1] = linear_to_srgb[pixel[1]];
-                pixel[2] = linear_to_srgb[pixel[2]];
-            }
-        }
-        painter.drawImage(QPoint(int(i % columns) * tile_size, int(i / columns) * tile_size), srgb_image);
-    }
-    painter.end();
-
-    QByteArray png;
-    QBuffer buffer(&png);
-    buffer.open(QIODevice::WriteOnly);
-    preview.save(&buffer, "PNG");
-    return QStringLiteral("data:image/png;base64,") + QString::fromLatin1(png.toBase64());
-}
-
 struct CpuCompressionResult {
     std::vector<nucleus::utils::MipmappedColourTexture> textures;
     double source_preparation_ms = 0.0;
@@ -354,6 +315,65 @@ QString cpu_encoder_name(BenchmarkItem::CpuEncoder encoder)
         return QString::fromLatin1(nucleus::utils::basis_universal_format_name(nucleus::utils::BasisUniversalFormat::XUASTC_LDR_4x4));
     }
     return QStringLiteral("Unknown");
+}
+
+constexpr std::array<BenchmarkItem::GpuEncoder, 5> gpu_encoders {
+    BenchmarkItem::GpuEncoder::Search,
+    BenchmarkItem::GpuEncoder::FastRange,
+    BenchmarkItem::GpuEncoder::FastSplit,
+    BenchmarkItem::GpuEncoder::FastSplitFused,
+    BenchmarkItem::GpuEncoder::FastSplitBounds,
+};
+
+QString gpu_encoder_name(BenchmarkItem::GpuEncoder encoder, int effort)
+{
+    switch (encoder) {
+    case BenchmarkItem::GpuEncoder::Search:
+        return QStringLiteral("GPU Search (reference), effort %1").arg(effort);
+    case BenchmarkItem::GpuEncoder::FastRange:
+        return QStringLiteral("GPU Fast range");
+    case BenchmarkItem::GpuEncoder::FastSplit:
+        return QStringLiteral("GPU Fast split");
+    case BenchmarkItem::GpuEncoder::FastSplitFused:
+        return QStringLiteral("GPU Fast split fused");
+    case BenchmarkItem::GpuEncoder::FastSplitBounds:
+        return QStringLiteral("GPU Fast split bounds");
+    }
+    return QStringLiteral("GPU Search (reference)");
+}
+
+QString gpu_backend_name(BenchmarkItem::GpuEncoder encoder)
+{
+    switch (encoder) {
+    case BenchmarkItem::GpuEncoder::Search:
+        return QStringLiteral("Fragment shader search + PBO");
+    case BenchmarkItem::GpuEncoder::FastRange:
+        return QStringLiteral("Fragment shader fast range + PBO");
+    case BenchmarkItem::GpuEncoder::FastSplit:
+        return QStringLiteral("Fragment shader fast split + PBO");
+    case BenchmarkItem::GpuEncoder::FastSplitFused:
+        return QStringLiteral("Fragment shader fast split fused + PBO");
+    case BenchmarkItem::GpuEncoder::FastSplitBounds:
+        return QStringLiteral("Fragment shader fast split bounds + PBO");
+    }
+    return QStringLiteral("Fragment shader search + PBO");
+}
+
+gl_engine::TextureCompressor::Encoder compressor_encoder(BenchmarkItem::GpuEncoder encoder)
+{
+    switch (encoder) {
+    case BenchmarkItem::GpuEncoder::Search:
+        return gl_engine::TextureCompressor::Encoder::Search;
+    case BenchmarkItem::GpuEncoder::FastRange:
+        return gl_engine::TextureCompressor::Encoder::FastRange;
+    case BenchmarkItem::GpuEncoder::FastSplit:
+        return gl_engine::TextureCompressor::Encoder::FastSplit;
+    case BenchmarkItem::GpuEncoder::FastSplitFused:
+        return gl_engine::TextureCompressor::Encoder::FastSplitFused;
+    case BenchmarkItem::GpuEncoder::FastSplitBounds:
+        return gl_engine::TextureCompressor::Encoder::FastSplitBounds;
+    }
+    return gl_engine::TextureCompressor::Encoder::Search;
 }
 
 nucleus::utils::BasisUniversalFormat basis_format(BenchmarkItem::CpuEncoder encoder)
@@ -476,6 +496,7 @@ public:
         auto* benchmark_item = static_cast<BenchmarkItem*>(item);
         m_item = benchmark_item;
         m_window = benchmark_item->window();
+        m_preview_encoder = benchmark_item->m_preview_encoder;
         if (benchmark_item->m_request_serial == m_seen_serial)
             return;
         m_seen_serial = benchmark_item->m_request_serial;
@@ -486,14 +507,13 @@ public:
         m_effort = benchmark_item->m_effort;
         m_mipmaps = benchmark_item->m_mipmaps;
         m_source_images = benchmark_item->m_source_images;
-        m_preview_source.clear();
+        m_preview_results.clear();
+        m_preview_textures = {};
         m_pending = true;
     }
 
     void render() override
     {
-        if (!m_pending && !m_pending_gpu_report)
-            return;
         m_window->beginExternalCommands();
         std::optional<std::pair<QString, QString>> completed;
         if (m_pending) {
@@ -502,30 +522,76 @@ public:
             if (!m_pending_gpu_report)
                 completed = immediate;
         } else {
-            completed = poll_gpu_report();
+            if (m_pending_gpu_report)
+                completed = poll_gpu_report();
         }
+        draw_preview();
         m_window->endExternalCommands();
         if (completed) {
             QPointer<BenchmarkItem> item = m_item;
             const auto [text, json] = std::move(*completed);
-            const auto preview_source = m_preview_source;
-            QMetaObject::invokeMethod(m_item, [item, text, json, preview_source]() {
+            const auto preview_results = m_preview_results;
+            QMetaObject::invokeMethod(m_item, [item, text, json, preview_results]() {
                 if (item)
-                    item->publishResults(text, json, preview_source);
+                    item->publishResults(text, json, preview_results);
             });
-        } else {
+        } else if (m_pending || m_pending_gpu_report) {
             request_another_frame();
         }
     }
 
-    QOpenGLFramebufferObject* createFramebufferObject(const QSize&) override
+    QOpenGLFramebufferObject* createFramebufferObject(const QSize& size) override
     {
         QOpenGLFramebufferObjectFormat format;
         format.setAttachment(QOpenGLFramebufferObject::NoAttachment);
-        return new QOpenGLFramebufferObject(QSize(1, 1), format);
+        return new QOpenGLFramebufferObject(size.expandedTo(QSize(1, 1)), format);
     }
 
 private:
+    void draw_preview()
+    {
+        if (m_preview_encoder < 0 || size_t(m_preview_encoder) >= m_preview_textures.size()
+            || !m_preview_textures[size_t(m_preview_encoder)])
+            return;
+
+        if (!m_preview_shader) {
+            m_preview_shader = std::make_unique<gl_engine::ShaderProgram>(R"(
+                out highp vec2 texcoords;
+                void main() {
+                    highp vec2 vertices[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+                    gl_Position = vec4(vertices[gl_VertexID], 0.0, 1.0);
+                    texcoords = 0.5 * gl_Position.xy + vec2(0.5);
+                })",
+                R"(
+                uniform lowp sampler2DArray texture_sampler;
+                in highp vec2 texcoords;
+                out lowp vec4 out_color;
+                void main() {
+                    highp vec2 grid_position = texcoords * 4.0;
+                    highp ivec2 cell = min(ivec2(grid_position), ivec2(3));
+                    highp float layer = float((3 - cell.y) * 4 + cell.x);
+                    highp vec2 tile_coordinates = fract(grid_position);
+                    out_color = textureLod(texture_sampler,
+                        vec3(tile_coordinates.x, 1.0 - tile_coordinates.y, layer), 0.0);
+                })",
+                gl_engine::ShaderCodeSource::PLAINTEXT);
+            m_preview_geometry = gl_engine::helpers::create_screen_quad_geometry();
+        }
+
+        auto* f = QOpenGLContext::currentContext()->extraFunctions();
+        framebufferObject()->bind();
+        f->glViewport(0, 0, framebufferObject()->width(), framebufferObject()->height());
+        f->glDisable(GL_BLEND);
+        f->glDisable(GL_CULL_FACE);
+        f->glDisable(GL_DEPTH_TEST);
+        f->glDisable(GL_SCISSOR_TEST);
+        m_preview_shader->bind();
+        m_preview_textures[size_t(m_preview_encoder)]->bind(0);
+        m_preview_shader->set_uniform("texture_sampler", 0);
+        m_preview_geometry.draw();
+        m_preview_shader->release();
+    }
+
     void request_another_frame()
     {
         update();
@@ -838,31 +904,12 @@ private:
         }
 
         const auto algorithm = gl_engine::Texture::compression_algorithm();
-        const auto backend_name = [this]() {
-            switch (m_gpu_encoder) {
-            case BenchmarkItem::GpuEncoder::FastRange:
-                return QStringLiteral("Fragment shader fast range + PBO");
-            case BenchmarkItem::GpuEncoder::FastSplit:
-                return QStringLiteral("Fragment shader fast split + PBO");
-            case BenchmarkItem::GpuEncoder::FastSplitFused:
-                return QStringLiteral("Fragment shader fast split fused + PBO");
-            case BenchmarkItem::GpuEncoder::FastSplitBounds:
-                return QStringLiteral("Fragment shader fast split bounds + PBO");
-            case BenchmarkItem::GpuEncoder::Search:
-                return QStringLiteral("Fragment shader search + PBO");
-            }
-            return QStringLiteral("Fragment shader search + PBO");
-        }();
+        const auto backend_name = gpu_backend_name(m_gpu_encoder);
         const auto filter = m_mipmaps ? gl_engine::Texture::Filter::MipMapLinear : gl_engine::Texture::Filter::Linear;
         const gl_engine::TextureCompressor::Settings gpu_settings {
             .algorithm = algorithm,
             .effort = unsigned(m_effort),
-            .encoder = m_gpu_encoder == BenchmarkItem::GpuEncoder::FastRange
-                ? gl_engine::TextureCompressor::Encoder::FastRange
-                : m_gpu_encoder == BenchmarkItem::GpuEncoder::FastSplit ? gl_engine::TextureCompressor::Encoder::FastSplit
-                : m_gpu_encoder == BenchmarkItem::GpuEncoder::FastSplitFused ? gl_engine::TextureCompressor::Encoder::FastSplitFused
-                : m_gpu_encoder == BenchmarkItem::GpuEncoder::FastSplitBounds ? gl_engine::TextureCompressor::Encoder::FastSplitBounds
-                                                                              : gl_engine::TextureCompressor::Encoder::Search,
+            .encoder = compressor_encoder(m_gpu_encoder),
             .generate_mipmaps = m_mipmaps,
             .timing_mode = gl_engine::TextureCompressor::TimingMode::EndToEnd,
         };
@@ -885,45 +932,57 @@ private:
             return elapsed_ms(start);
         };
 
-        // Quality is evaluated first with one untimed compression of all 16 images.
+        // Quality is evaluated first over all 16 images. These destinations remain resident and
+        // are sampled directly by the preview renderer.
         double cpu_psnr = 0.0;
         double gpu_psnr = 0.0;
         {
-            gl_engine::Texture cpu_quality_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
-            cpu_quality_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
-            cpu_quality_destination.allocate_array(resolution, resolution, unsigned(tile_groups.size()));
+            m_preview_results.clear();
+            m_preview_results.reserve(1 + gpu_encoders.size());
+            m_preview_textures[0] = std::make_unique<gl_engine::Texture>(
+                gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
+            m_preview_textures[0]->setParams(filter, gl_engine::Texture::Filter::Linear);
+            m_preview_textures[0]->allocate_array(resolution, resolution, unsigned(tile_groups.size()));
             auto cpu_quality = compress_cpu(all_sources);
             if (!cpu_quality)
                 return compression_error(cpu_quality.error());
-            static_cast<void>(upload_cpu(cpu_quality_destination, cpu_quality->textures));
-
-            gl_engine::Texture gpu_quality_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
-            gpu_quality_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
-            gpu_quality_destination.allocate_array(resolution, resolution, unsigned(tile_groups.size()));
-            gl_engine::TextureCompressor gpu_quality_compressor(resolution, resolution, unsigned(tile_groups.size()));
-            static_cast<void>(gpu_quality_compressor.compress(all_sources, gpu_quality_destination, quality_layers, gpu_settings));
+            static_cast<void>(upload_cpu(*m_preview_textures[0], cpu_quality->textures));
 
             std::vector<QImage> cpu_reconstructed;
-            std::vector<QImage> gpu_reconstructed;
             cpu_reconstructed.reserve(all_sources.size());
-            gpu_reconstructed.reserve(all_sources.size());
-            for (unsigned layer = 0; layer < all_sources.size(); ++layer) {
-                cpu_reconstructed.push_back(reconstruct(cpu_quality_destination, resolution, layer));
-                gpu_reconstructed.push_back(reconstruct(gpu_quality_destination, resolution, layer));
-            }
+            for (unsigned layer = 0; layer < all_sources.size(); ++layer)
+                cpu_reconstructed.push_back(reconstruct(*m_preview_textures[0], resolution, layer));
             cpu_psnr = linear_psnr(cpu_reconstructed, all_sources);
-            gpu_psnr = linear_psnr(gpu_reconstructed, all_sources);
-            m_preview_source = preview_data_url(cpu_reconstructed);
+            m_preview_results.push_back({ QStringLiteral("CPU %1").arg(cpu_encoder_name(m_cpu_encoder)), cpu_psnr, 0.0 });
+
+            for (size_t encoder_index = 0; encoder_index < gpu_encoders.size(); ++encoder_index) {
+                const auto encoder = gpu_encoders[encoder_index];
+                auto& preview_texture = m_preview_textures[encoder_index + 1];
+                preview_texture = std::make_unique<gl_engine::Texture>(
+                    gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
+                preview_texture->setParams(filter, gl_engine::Texture::Filter::Linear);
+                preview_texture->allocate_array(resolution, resolution, unsigned(tile_groups.size()));
+                gl_engine::TextureCompressor preview_compressor(resolution, resolution, unsigned(tile_groups.size()));
+                auto preview_settings = gpu_settings;
+                preview_settings.encoder = compressor_encoder(encoder);
+                static_cast<void>(preview_compressor.compress(all_sources, *preview_texture, quality_layers, preview_settings));
+
+                std::vector<QImage> reconstructed;
+                reconstructed.reserve(all_sources.size());
+                for (unsigned layer = 0; layer < all_sources.size(); ++layer)
+                    reconstructed.push_back(reconstruct(*preview_texture, resolution, layer));
+                const auto psnr = linear_psnr(reconstructed, all_sources);
+                m_preview_results.push_back({ gpu_encoder_name(encoder, m_effort), psnr, 0.0 });
+                if (encoder == m_gpu_encoder)
+                    gpu_psnr = psnr;
+            }
         }
 
         gl_engine::Texture cpu_destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
         cpu_destination.setParams(filter, gl_engine::Texture::Filter::Linear);
         cpu_destination.allocate_array(resolution, resolution, batch_size);
-        auto gpu_destination = std::make_unique<gl_engine::Texture>(
-            gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
-        gpu_destination->setParams(filter, gl_engine::Texture::Filter::Linear);
-        gpu_destination->allocate_array(resolution, resolution, batch_size);
-        auto gpu_compressor = std::make_unique<gl_engine::TextureCompressor>(resolution, resolution, batch_size);
+        std::unique_ptr<gl_engine::Texture> gpu_destination;
+        std::unique_ptr<gl_engine::TextureCompressor> gpu_compressor;
         m_gpu_timer = std::make_unique<gl_engine::TextureCompressor::GpuTimer>();
 
         std::vector<double> cpu_compression_times;
@@ -962,9 +1021,6 @@ private:
                 return compression_error(compressed.error());
             static_cast<void>(upload_cpu(cpu_destination, compressed->textures));
         }
-        for (int group = 0; group < batches_per_round; ++group)
-            static_cast<void>(gpu_compressor->compress(sources_for_group(group), *gpu_destination, layers, gpu_settings));
-
         for (int round = 0; round < measurement_rounds; ++round) {
             for (int group = 0; group < batches_per_round; ++group) {
                 const auto cpu_start = Clock::now();
@@ -984,12 +1040,35 @@ private:
             }
         }
 
-        for (int round = 0; round < measurement_rounds; ++round) {
-            for (int group = 0; group < batches_per_round; ++group) {
-                const auto gpu = gpu_compressor->compress(sources_for_group(group), *gpu_destination, layers, gpu_settings);
-                gpu_total_times.push_back(gpu.timings.total_ms);
+        for (size_t encoder_index = 0; encoder_index < gpu_encoders.size(); ++encoder_index) {
+            const auto encoder = gpu_encoders[encoder_index];
+            auto destination = std::make_unique<gl_engine::Texture>(
+                gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
+            destination->setParams(filter, gl_engine::Texture::Filter::Linear);
+            destination->allocate_array(resolution, resolution, batch_size);
+            auto compressor = std::make_unique<gl_engine::TextureCompressor>(resolution, resolution, batch_size);
+            auto settings = gpu_settings;
+            settings.encoder = compressor_encoder(encoder);
+
+            for (int group = 0; group < batches_per_round; ++group)
+                static_cast<void>(compressor->compress(sources_for_group(group), *destination, layers, settings));
+
+            std::vector<double> encoder_times;
+            encoder_times.reserve(sample_count);
+            for (int round = 0; round < measurement_rounds; ++round) {
+                for (int group = 0; group < batches_per_round; ++group) {
+                    const auto gpu = compressor->compress(sources_for_group(group), *destination, layers, settings);
+                    encoder_times.push_back(gpu.timings.total_ms);
+                }
+            }
+            m_preview_results[encoder_index + 1].compression_time_ms = statistics(encoder_times).median;
+            if (encoder == m_gpu_encoder) {
+                gpu_total_times = std::move(encoder_times);
+                gpu_destination = std::move(destination);
+                gpu_compressor = std::move(compressor);
             }
         }
+        Q_ASSERT(gpu_destination && gpu_compressor);
 
         // Stage timings are collected in a separate profiling phase. Each stage is completed
         // independently, so these values diagnose where time is spent but are not summed to
@@ -1028,6 +1107,7 @@ private:
         const auto gpu_output_transfer = statistics(gpu_output_transfer_times.total);
         const auto gpu_compressed_upload = statistics(gpu_compressed_upload_times.total);
         const auto gpu_total = statistics(gpu_total_times);
+        m_preview_results[0].compression_time_ms = cpu_total.median;
         const auto algorithm_name = algorithm == nucleus::utils::ColourTexture::Format::DXT1 ? QStringLiteral("DXT1 / BC1") : QStringLiteral("ETC1 in ETC2");
         const auto cpu_backend_name = cpu_encoder_name(m_cpu_encoder);
 
@@ -1223,9 +1303,13 @@ private:
     BenchmarkItem::GpuEncoder m_gpu_encoder = BenchmarkItem::GpuEncoder::FastSplitFused;
     int m_effort = 4;
     bool m_mipmaps = true;
+    int m_preview_encoder = 0;
     bool m_pending = false;
     std::vector<QImage> m_source_images;
-    QString m_preview_source;
+    std::vector<BenchmarkItem::PreviewResult> m_preview_results;
+    std::array<std::unique_ptr<gl_engine::Texture>, 1 + gpu_encoders.size()> m_preview_textures;
+    std::unique_ptr<gl_engine::ShaderProgram> m_preview_shader;
+    gl_engine::helpers::ScreenQuadGeometry m_preview_geometry;
     std::unique_ptr<gl_engine::TextureCompressor::GpuTimer> m_gpu_timer;
     std::optional<PendingGpuReport> m_pending_gpu_report;
 };
@@ -1234,6 +1318,7 @@ BenchmarkItem::BenchmarkItem(QQuickItem* parent)
     : QQuickFramebufferObject(parent)
     , m_network_manager(new QNetworkAccessManager(this))
 {
+    setMirrorVertically(true);
     downloadBenchmarkData();
 }
 
@@ -1301,7 +1386,45 @@ QString BenchmarkItem::dataStatus() const { return m_data_status; }
 bool BenchmarkItem::running() const { return m_running; }
 QString BenchmarkItem::resultText() const { return m_result_text; }
 QString BenchmarkItem::resultJson() const { return m_result_json; }
-QString BenchmarkItem::previewSource() const { return m_preview_source; }
+int BenchmarkItem::previewEncoder() const { return m_preview_encoder; }
+void BenchmarkItem::setPreviewEncoder(int value)
+{
+    if (!m_preview_results.empty())
+        value = std::clamp(value, 0, int(m_preview_results.size()) - 1);
+    else
+        value = 0;
+    if (m_preview_encoder == value)
+        return;
+    m_preview_encoder = value;
+    emit previewEncoderChanged();
+    emit previewDetailsChanged();
+    update();
+}
+
+bool BenchmarkItem::previewReady() const { return !m_preview_results.empty(); }
+QStringList BenchmarkItem::previewEncoders() const
+{
+    QStringList result;
+    result.reserve(qsizetype(m_preview_results.size()));
+    for (const auto& preview : m_preview_results)
+        result.push_back(preview.name);
+    return result;
+}
+
+QString BenchmarkItem::previewName() const
+{
+    return previewReady() ? m_preview_results[size_t(m_preview_encoder)].name : QString {};
+}
+
+double BenchmarkItem::previewPsnr() const
+{
+    return previewReady() ? m_preview_results[size_t(m_preview_encoder)].psnr : 0.0;
+}
+
+double BenchmarkItem::previewCompressionTime() const
+{
+    return previewReady() ? m_preview_results[size_t(m_preview_encoder)].compression_time_ms : 0.0;
+}
 
 void BenchmarkItem::downloadBenchmarkData()
 {
@@ -1376,12 +1499,15 @@ void BenchmarkItem::runBenchmark()
     m_running = true;
     m_result_text = QStringLiteral("Computing PSNR, then measuring batch size 4…");
     m_result_json.clear();
-    m_preview_source.clear();
+    m_preview_results.clear();
+    m_preview_encoder = 0;
     ++m_request_serial;
     emit runningChanged();
     emit resultTextChanged();
     emit resultJsonChanged();
-    emit previewSourceChanged();
+    emit previewEncoderChanged();
+    emit previewResultsChanged();
+    emit previewDetailsChanged();
     update();
 }
 
@@ -1391,14 +1517,18 @@ void BenchmarkItem::copyResultJson()
         QGuiApplication::clipboard()->setText(m_result_json);
 }
 
-void BenchmarkItem::publishResults(const QString& text, const QString& json, const QString& preview_source)
+void BenchmarkItem::publishResults(
+    const QString& text, const QString& json, const std::vector<BenchmarkItem::PreviewResult>& preview_results)
 {
     m_result_text = text;
     m_result_json = json;
-    m_preview_source = preview_source;
+    m_preview_results = preview_results;
+    m_preview_encoder = std::clamp(m_preview_encoder, 0, std::max(0, int(m_preview_results.size()) - 1));
     m_running = false;
     emit resultTextChanged();
     emit resultJsonChanged();
-    emit previewSourceChanged();
+    emit previewResultsChanged();
+    emit previewDetailsChanged();
     emit runningChanged();
+    update();
 }

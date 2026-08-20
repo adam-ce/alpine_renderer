@@ -17,11 +17,16 @@ ApplicationWindow {
 
     BenchmarkItem {
         id: benchmark
+
+        readonly property bool showingPreview: previewDialogLoader.status === Loader.Ready
+            && previewDialogLoader.item.opened
+
+        parent: showingPreview ? previewDialogLoader.item.previewHost : root.contentItem
         x: 0
         y: 0
-        z: -1
-        width: 1
-        height: 1
+        z: showingPreview ? 0 : -1
+        width: showingPreview ? parent.width : 1
+        height: showingPreview ? parent.height : 1
     }
 
     ScrollView {
@@ -216,9 +221,14 @@ ApplicationWindow {
                         Layout.fillWidth: true
 
                         Button {
-                            text: qsTr("Preview selected CPU encoder")
-                            enabled: !benchmark.running && benchmark.previewSource.length > 0
-                            onClicked: previewDialogLoader.active = true
+                            text: qsTr("Preview encoders")
+                            enabled: !benchmark.running && benchmark.previewReady
+                            onClicked: {
+                                if (previewDialogLoader.status === Loader.Ready)
+                                    previewDialogLoader.item.open()
+                                else
+                                    previewDialogLoader.active = true
+                            }
                         }
 
                         Button {
@@ -246,61 +256,74 @@ ApplicationWindow {
             Dialog {
                 id: previewDialog
 
+                property alias previewHost: previewHost
+
                 parent: Overlay.overlay
                 anchors.centerIn: parent
                 width: Math.min(root.width - 40, 820)
                 height: Math.min(root.height - 40, 880)
                 modal: true
-                title: qsTr("Selected CPU-compressed tiles")
+                title: qsTr("Compressed tile preview")
                 standardButtons: Dialog.Close
-                onClosed: previewDialogLoader.active = false
 
-                contentItem: Flickable {
-                    id: previewViewport
+                contentItem: ColumnLayout {
+                    spacing: 8
 
-                    property real zoom: 1.0
-                    property real pinchStartZoom: 1.0
-                    property real pinchStartContentX: 0.0
-                    property real pinchStartContentY: 0.0
-
-                    clip: true
-                    boundsBehavior: Flickable.StopAtBounds
-                    contentWidth: Math.max(width, previewImage.width)
-                    contentHeight: Math.max(height, previewImage.height)
-
-                    Image {
-                        id: previewImage
-
-                        readonly property real fittedSize: Math.min(previewViewport.width, previewViewport.height)
-
-                        x: (previewViewport.contentWidth - width) / 2
-                        y: (previewViewport.contentHeight - height) / 2
-                        width: fittedSize * previewViewport.zoom
-                        height: width
-                        source: benchmark.previewSource
-                        sourceSize: Qt.size(2048, 2048)
-                        asynchronous: true
-                        fillMode: Image.PreserveAspectFit
+                    ComboBox {
+                        Layout.fillWidth: true
+                        model: benchmark.previewEncoders
+                        currentIndex: benchmark.previewEncoder
+                        onActivated: benchmark.previewEncoder = currentIndex
                     }
 
-                    PinchHandler {
-                        target: null
+                    Item {
+                        id: previewContainer
 
-                        onActiveChanged: {
-                            if (active) {
-                                previewViewport.pinchStartZoom = previewViewport.zoom
-                                previewViewport.pinchStartContentX = previewViewport.contentX
-                                previewViewport.pinchStartContentY = previewViewport.contentY
-                            } else {
-                                previewViewport.returnToBounds()
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        Layout.minimumHeight: 240
+
+                        Flickable {
+                            id: previewViewport
+
+                            anchors.fill: parent
+                            clip: true
+                            boundsBehavior: Flickable.StopAtBounds
+                            contentWidth: Math.max(width, previewHost.width * previewHost.scale)
+                            contentHeight: Math.max(height, previewHost.height * previewHost.scale)
+
+                            Item {
+                                id: previewHost
+
+                                readonly property real fittedSize: Math.min(previewViewport.width, previewViewport.height)
+
+                                x: (previewViewport.contentWidth - width) / 2
+                                y: (previewViewport.contentHeight - height) / 2
+                                width: fittedSize
+                                height: width
+
+                                PinchHandler {
+                                    target: previewHost
+                                    rotationAxis.enabled: false
+                                    xAxis.enabled: false
+                                    yAxis.enabled: false
+                                    scaleAxis.minimum: 1
+                                    scaleAxis.maximum: 8
+                                }
                             }
                         }
-                        onActiveScaleChanged: {
-                            const newZoom = Math.max(1.0, Math.min(8.0, previewViewport.pinchStartZoom * activeScale))
-                            const zoomRatio = newZoom / previewViewport.pinchStartZoom
-                            previewViewport.zoom = newZoom
-                            previewViewport.contentX = (previewViewport.pinchStartContentX + centroid.position.x) * zoomRatio - centroid.position.x
-                            previewViewport.contentY = (previewViewport.pinchStartContentY + centroid.position.y) * zoomRatio - centroid.position.y
+
+                        Frame {
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.margins: 8
+
+                            Label {
+                                text: qsTr("%1\nPSNR: %2 dB\nCompleted compression: %3 ms")
+                                    .arg(benchmark.previewName)
+                                    .arg(benchmark.previewPsnr.toFixed(2))
+                                    .arg(benchmark.previewCompressionTime.toFixed(3))
+                            }
                         }
                     }
                 }

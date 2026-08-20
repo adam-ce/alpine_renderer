@@ -9,6 +9,7 @@
 #include <QImage>
 #include <QQuickFramebufferObject>
 #include <QString>
+#include <QStringList>
 #include <QtQmlIntegration>
 #include <vector>
 
@@ -28,13 +29,24 @@ class BenchmarkItem : public QQuickFramebufferObject {
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
     Q_PROPERTY(QString resultText READ resultText NOTIFY resultTextChanged)
     Q_PROPERTY(QString resultJson READ resultJson NOTIFY resultJsonChanged)
-    Q_PROPERTY(QString previewSource READ previewSource NOTIFY previewSourceChanged)
+    Q_PROPERTY(int previewEncoder READ previewEncoder WRITE setPreviewEncoder NOTIFY previewEncoderChanged)
+    Q_PROPERTY(bool previewReady READ previewReady NOTIFY previewResultsChanged)
+    Q_PROPERTY(QStringList previewEncoders READ previewEncoders NOTIFY previewResultsChanged)
+    Q_PROPERTY(QString previewName READ previewName NOTIFY previewDetailsChanged)
+    Q_PROPERTY(double previewPsnr READ previewPsnr NOTIFY previewDetailsChanged)
+    Q_PROPERTY(double previewCompressionTime READ previewCompressionTime NOTIFY previewDetailsChanged)
 
 public:
     enum class CpuEncoder { Goofy, BasisEtc1s, BasisUastcLdr4x4, BasisXuastcLdr4x4 };
     Q_ENUM(CpuEncoder)
     enum class GpuEncoder { Search, FastRange, FastSplit, FastSplitFused, FastSplitBounds };
     Q_ENUM(GpuEncoder)
+
+    struct PreviewResult {
+        QString name;
+        double psnr = 0.0;
+        double compression_time_ms = 0.0;
+    };
 
     explicit BenchmarkItem(QQuickItem* parent = nullptr);
     Renderer* createRenderer() const override;
@@ -56,7 +68,13 @@ public:
     [[nodiscard]] bool running() const;
     [[nodiscard]] QString resultText() const;
     [[nodiscard]] QString resultJson() const;
-    [[nodiscard]] QString previewSource() const;
+    [[nodiscard]] int previewEncoder() const;
+    void setPreviewEncoder(int value);
+    [[nodiscard]] bool previewReady() const;
+    [[nodiscard]] QStringList previewEncoders() const;
+    [[nodiscard]] QString previewName() const;
+    [[nodiscard]] double previewPsnr() const;
+    [[nodiscard]] double previewCompressionTime() const;
 
     Q_INVOKABLE void runBenchmark();
     Q_INVOKABLE void copyResultJson();
@@ -73,13 +91,15 @@ signals:
     void runningChanged();
     void resultTextChanged();
     void resultJsonChanged();
-    void previewSourceChanged();
+    void previewEncoderChanged();
+    void previewResultsChanged();
+    void previewDetailsChanged();
 
 private:
     friend class BenchmarkRenderer;
     void downloadBenchmarkData();
     void stitchBenchmarkData();
-    void publishResults(const QString& text, const QString& json, const QString& preview_source);
+    void publishResults(const QString& text, const QString& json, const std::vector<PreviewResult>& preview_results);
 
     CpuEncoder m_cpu_encoder = CpuEncoder::Goofy;
     int m_basis_quality = 75;
@@ -97,5 +117,6 @@ private:
     QString m_data_status = QStringLiteral("Downloading benchmark imagery…");
     QString m_result_text = QStringLiteral("Waiting for benchmark imagery.");
     QString m_result_json;
-    QString m_preview_source;
+    int m_preview_encoder = 0;
+    std::vector<PreviewResult> m_preview_results;
 };
