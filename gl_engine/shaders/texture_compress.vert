@@ -584,7 +584,15 @@ highp uvec2 compress_block(highp ivec2 block,
         }
     }
 
-#ifdef ALP_COMPRESS_ETC1
+#ifdef ALP_COMPRESS_CHECKSUM
+    highp uvec2 checksum = uvec2(0u);
+    for (int i = 0; i < 16; ++i) {
+        highp uint packed_value = pixels[i].r | pixels[i].g << 8u | pixels[i].b << 16u;
+        checksum.x = checksum.x * 33u ^ packed_value;
+        checksum.y = checksum.y + packed_value * uint(i + 1);
+    }
+    return checksum;
+#elif defined(ALP_COMPRESS_ETC1)
 #ifdef ALP_COMPRESS_ETC1_SPLIT_BOUNDS
     return encode_etc1_fast_split_bounds(pixels);
 #elif defined(ALP_COMPRESS_ETC1_SPLIT_FUSED)

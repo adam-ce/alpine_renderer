@@ -5,6 +5,7 @@
  *****************************************************************************/
 
 #include "TexturePreviewItem.h"
+#include "TextureCompressionData.h"
 
 #include <QImage>
 #include <QNetworkAccessManager>
@@ -37,38 +38,8 @@
 namespace {
 using Raster = radix::Raster<glm::u8vec4>;
 
-struct TileGroup {
-    int zoom;
-    int y;
-    int x;
-};
-
-constexpr std::array<TileGroup, 16> tile_groups { {
-    { 17, 45448, 71496 },
-    { 16, 22832, 35144 },
-    { 16, 23030, 35578 },
-    { 13, 2852, 4476 },
-    { 14, 5702, 8808 },
-    { 15, 11574, 17670 },
-    { 16, 23030, 35078 },
-    { 15, 11460, 17622 },
-    { 14, 5752, 8656 },
-    { 16, 23084, 34746 },
-    { 14, 5684, 8926 },
-    { 15, 11418, 17692 },
-    { 16, 22956, 34570 },
-    { 15, 11358, 17904 },
-    { 16, 22910, 35770 },
-    { 14, 5656, 8938 },
-} };
-
-QString tileUrl(const TileGroup& group, int x_offset, int y_offset)
-{
-    return QStringLiteral("https://gataki.cg.tuwien.ac.at/raw/basemap/tiles/%1/%2/%3.jpeg")
-        .arg(group.zoom)
-        .arg(group.y + y_offset)
-        .arg(group.x + x_offset);
-}
+using texture_compression_data::tile_groups;
+using texture_compression_data::tile_url;
 
 double srgbToLinear(uint8_t value)
 {
@@ -415,7 +386,7 @@ void TexturePreviewItem::downloadImages()
         for (int y = 0; y < 2; ++y) {
             for (int x = 0; x < 2; ++x) {
                 const auto tile_index = group_index * 4 + size_t(y * 2 + x);
-                const auto url = tileUrl(tile_groups[group_index], x, y);
+                const auto url = tile_url(tile_groups[group_index], x, y);
                 auto* reply = m_network_manager->get(QNetworkRequest(QUrl(url)));
                 connect(reply, &QNetworkReply::finished, this, [this, reply, tile_index, url]() {
                     if (reply->error() == QNetworkReply::NoError) {

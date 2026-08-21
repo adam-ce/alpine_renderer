@@ -91,7 +91,7 @@ private:
 
 class TextureCompressor {
 public:
-    enum class Encoder { Search, FastRange, FastSplit, FastSplitFused, FastSplitBounds };
+    enum class Encoder { Search, FastRange, FastSplit, FastSplitFused, FastSplitBounds, Checksum };
 
     struct Settings {
         nucleus::utils::ColourTexture::Format algorithm = nucleus::utils::ColourTexture::Format::DXT1;

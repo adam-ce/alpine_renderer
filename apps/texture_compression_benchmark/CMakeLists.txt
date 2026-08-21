@@ -8,6 +8,7 @@ project(texture-compression-preview LANGUAGES CXX)
 
 qt_add_executable(texture_compression_preview
     main.cpp
+    TextureCompressionData.h
     TexturePreviewItem.h
     TexturePreviewItem.cpp
 )

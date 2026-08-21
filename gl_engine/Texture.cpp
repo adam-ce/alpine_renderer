@@ -406,6 +406,7 @@ struct gl_engine::TextureCompressor::Impl {
     std::unique_ptr<ShaderProgram> etc1_fast_split_fragment_program;
     std::unique_ptr<ShaderProgram> etc1_fast_split_fused_fragment_program;
     std::unique_ptr<ShaderProgram> etc1_fast_split_bounds_fragment_program;
+    std::unique_ptr<ShaderProgram> checksum_fragment_program;
     std::unique_ptr<ShaderProgram> packing_program;
 
     Impl(unsigned texture_width, unsigned texture_height, unsigned maximum_batch_size)
@@ -504,6 +505,10 @@ struct gl_engine::TextureCompressor::Impl {
             "texture_compress.vert",
             ShaderCodeSource::FILE,
             std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1"), QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_BOUNDS") });
+        checksum_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
+            "texture_compress.vert",
+            ShaderCodeSource::FILE,
+            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_CHECKSUM") });
         packing_program = std::make_unique<ShaderProgram>(
             "texture_compress_raster.vert", "texture_compress_pack.frag", ShaderCodeSource::FILE);
 
@@ -517,6 +522,7 @@ struct gl_engine::TextureCompressor::Impl {
         etc1_fast_split_fragment_program.reset();
         etc1_fast_split_fused_fragment_program.reset();
         etc1_fast_split_bounds_fragment_program.reset();
+        checksum_fragment_program.reset();
         packing_program.reset();
         if (!QOpenGLContext::currentContext())
             return;
@@ -663,7 +669,9 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
 
     {
         auto* program = m->dxt1_fragment_program.get();
-        if (settings.algorithm == nucleus::utils::ColourTexture::Format::ETC1) {
+        if (settings.encoder == Encoder::Checksum) {
+            program = m->checksum_fragment_program.get();
+        } else if (settings.algorithm == nucleus::utils::ColourTexture::Format::ETC1) {
             if (settings.encoder == Encoder::FastRange)
                 program = m->etc1_fast_fragment_program.get();
             else if (settings.encoder == Encoder::FastSplit)
