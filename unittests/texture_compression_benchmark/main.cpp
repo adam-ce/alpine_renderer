@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iomanip>
+#include <limits>
 #include <numeric>
 #include <optional>
 #include <random>
@@ -55,6 +56,8 @@ constexpr int warmup_batches = 2;
 constexpr int measured_batches = 10;
 constexpr int repetitions = 200;
 constexpr uint32_t random_seed = 0x4a17c0deu;
+constexpr int ssim_window_size = 11;
+constexpr int ssim_window_radius = ssim_window_size / 2;
 
 enum class Operation { SamplingOnly, Compression };
 
@@ -63,12 +66,31 @@ struct Workload {
     uint32_t sampling_seed = 0;
 };
 
+struct QualityMetrics {
+    double psnr = 0.0;
+    double ssim = 0.0;
+};
+
 struct Algorithm {
     std::string name;
     Operation operation = Operation::Compression;
     gl_engine::TextureCompressor::Settings settings;
     bool checksum = false;
     std::vector<double> samples;
+    std::optional<QualityMetrics> quality;
+};
+
+struct QualityReference {
+    std::vector<double> ssim_luma;
+    std::vector<double> ssim_mean;
+    std::vector<double> ssim_second_moment;
+};
+
+struct QualityAccumulator {
+    double squared_error = 0.0;
+    uint64_t channel_count = 0;
+    double ssim_sum = 0.0;
+    uint64_t ssim_count = 0;
 };
 
 struct Statistics {
@@ -99,6 +121,158 @@ Statistics mean_statistics(std::span<const double> samples)
     const auto repetition_variance = squared_deviations / double(repetition_means.size() - 1);
     const auto mean_standard_deviation = std::sqrt(repetition_variance / double(repetition_means.size()));
     return { mean, mean_standard_deviation, samples.size() };
+}
+
+double srgb_to_linear(uint8_t value)
+{
+    const auto normalised = double(value) / 255.0;
+    if (normalised <= 0.04045)
+        return normalised / 12.92;
+    return std::pow((normalised + 0.055) / 1.055, 2.4);
+}
+
+double linear_to_srgb(double value)
+{
+    if (value <= 0.0031308)
+        return 12.92 * value;
+    return 1.055 * std::pow(value, 1.0 / 2.4) - 0.055;
+}
+
+std::array<double, ssim_window_size> ssim_kernel()
+{
+    constexpr double sigma = 1.5;
+    std::array<double, ssim_window_size> kernel {};
+    double sum = 0.0;
+    for (int i = -ssim_window_radius; i <= ssim_window_radius; ++i) {
+        const auto value = std::exp(-double(i * i) / (2.0 * sigma * sigma));
+        kernel[size_t(i + ssim_window_radius)] = value;
+        sum += value;
+    }
+    for (auto& value : kernel)
+        value /= sum;
+    return kernel;
+}
+
+std::vector<double> gaussian_filter_valid(std::span<const double> input, int width, int height)
+{
+    Q_ASSERT(width >= ssim_window_size && height >= ssim_window_size);
+    Q_ASSERT(input.size() == size_t(width * height));
+    static const auto kernel = ssim_kernel();
+    const auto horizontal_width = width - 2 * ssim_window_radius;
+    const auto output_height = height - 2 * ssim_window_radius;
+    std::vector<double> horizontal(size_t(horizontal_width * height));
+    for (int y = 0; y < height; ++y) {
+        for (int x = ssim_window_radius; x < width - ssim_window_radius; ++x) {
+            double value = 0.0;
+            for (int offset = -ssim_window_radius; offset <= ssim_window_radius; ++offset)
+                value += kernel[size_t(offset + ssim_window_radius)] * input[size_t(y * width + x + offset)];
+            horizontal[size_t(y * horizontal_width + x - ssim_window_radius)] = value;
+        }
+    }
+
+    std::vector<double> output(size_t(horizontal_width * output_height));
+    for (int y = ssim_window_radius; y < height - ssim_window_radius; ++y) {
+        for (int x = 0; x < horizontal_width; ++x) {
+            double value = 0.0;
+            for (int offset = -ssim_window_radius; offset <= ssim_window_radius; ++offset) {
+                value += kernel[size_t(offset + ssim_window_radius)]
+                    * horizontal[size_t((y + offset) * horizontal_width + x)];
+            }
+            output[size_t((y - ssim_window_radius) * horizontal_width + x)] = value;
+        }
+    }
+    return output;
+}
+
+QualityReference make_quality_reference(const Raster& source)
+{
+    QualityReference result;
+    result.ssim_luma.resize(size_t(source.width() * source.height()));
+    std::vector<double> squared_luma(result.ssim_luma.size());
+    for (unsigned y = 0; y < source.height(); ++y) {
+        for (unsigned x = 0; x < source.width(); ++x) {
+            const auto pixel = source.pixel({ x, y });
+            const auto luma = 0.2126 * double(pixel.x) / 255.0
+                + 0.7152 * double(pixel.y) / 255.0
+                + 0.0722 * double(pixel.z) / 255.0;
+            const auto index = size_t(y * source.width() + x);
+            result.ssim_luma[index] = luma;
+            squared_luma[index] = luma * luma;
+        }
+    }
+    result.ssim_mean = gaussian_filter_valid(result.ssim_luma, int(source.width()), int(source.height()));
+    result.ssim_second_moment = gaussian_filter_valid(squared_luma, int(source.width()), int(source.height()));
+    return result;
+}
+
+void accumulate_quality(QualityAccumulator& accumulator,
+    const QImage& reconstructed,
+    const Raster& source,
+    const QualityReference& reference)
+{
+    Q_ASSERT(reconstructed.size() == QSize(int(source.width()), int(source.height())));
+    std::vector<double> reconstructed_luma(size_t(source.width() * source.height()));
+    std::vector<double> squared_luma(reconstructed_luma.size());
+    std::vector<double> cross_luma(reconstructed_luma.size());
+    for (unsigned y = 0; y < source.height(); ++y) {
+        for (unsigned x = 0; x < source.width(); ++x) {
+            const auto actual = reconstructed.pixel(int(x), int(y));
+            const auto expected = source.pixel({ x, y });
+            const std::array<double, 3> actual_linear {
+                qRed(actual) / 255.0,
+                qGreen(actual) / 255.0,
+                qBlue(actual) / 255.0,
+            };
+            const std::array<double, 3> expected_linear {
+                srgb_to_linear(expected.x),
+                srgb_to_linear(expected.y),
+                srgb_to_linear(expected.z),
+            };
+            for (size_t channel = 0; channel < actual_linear.size(); ++channel) {
+                const auto difference = actual_linear[channel] - expected_linear[channel];
+                accumulator.squared_error += difference * difference;
+            }
+            accumulator.channel_count += actual_linear.size();
+
+            const auto luma = 0.2126 * linear_to_srgb(actual_linear[0])
+                + 0.7152 * linear_to_srgb(actual_linear[1])
+                + 0.0722 * linear_to_srgb(actual_linear[2]);
+            const auto index = size_t(y * source.width() + x);
+            reconstructed_luma[index] = luma;
+            squared_luma[index] = luma * luma;
+            cross_luma[index] = luma * reference.ssim_luma[index];
+        }
+    }
+
+    const auto actual_mean = gaussian_filter_valid(reconstructed_luma, int(source.width()), int(source.height()));
+    const auto actual_second_moment = gaussian_filter_valid(squared_luma, int(source.width()), int(source.height()));
+    const auto cross_moment = gaussian_filter_valid(cross_luma, int(source.width()), int(source.height()));
+    Q_ASSERT(actual_mean.size() == reference.ssim_mean.size());
+    constexpr double c1 = 0.01 * 0.01;
+    constexpr double c2 = 0.03 * 0.03;
+    for (size_t i = 0; i < actual_mean.size(); ++i) {
+        const auto reference_variance
+            = std::max(0.0, reference.ssim_second_moment[i] - reference.ssim_mean[i] * reference.ssim_mean[i]);
+        const auto actual_variance
+            = std::max(0.0, actual_second_moment[i] - actual_mean[i] * actual_mean[i]);
+        const auto covariance = cross_moment[i] - reference.ssim_mean[i] * actual_mean[i];
+        const auto luminance = 2.0 * reference.ssim_mean[i] * actual_mean[i] + c1;
+        const auto contrast_structure = 2.0 * covariance + c2;
+        const auto denominator = (reference.ssim_mean[i] * reference.ssim_mean[i] + actual_mean[i] * actual_mean[i] + c1)
+            * (reference_variance + actual_variance + c2);
+        accumulator.ssim_sum += luminance * contrast_structure / denominator;
+    }
+    accumulator.ssim_count += actual_mean.size();
+}
+
+QualityMetrics quality_metrics(const QualityAccumulator& accumulator)
+{
+    Q_ASSERT(accumulator.channel_count > 0 && accumulator.ssim_count > 0);
+    const auto mse = accumulator.squared_error / double(accumulator.channel_count);
+    return {
+        mse == 0.0 ? std::numeric_limits<double>::infinity() : 10.0 * std::log10(1.0 / mse),
+        accumulator.ssim_sum / double(accumulator.ssim_count),
+    };
 }
 
 std::string gl_string(GLenum name)
@@ -369,6 +543,74 @@ private:
                 << QStringLiteral("Completed repetition %1/%2").arg(repetition + 1).arg(repetitions);
         }
 
+        qInfo().noquote() << QStringLiteral("Computing untimed 512x512 quality metrics...");
+        std::vector<QualityReference> quality_references;
+        quality_references.reserve(m_sources.size());
+        for (const auto& source : m_sources)
+            quality_references.push_back(make_quality_reference(source));
+
+        gl_engine::Framebuffer quality_framebuffer(gl_engine::Framebuffer::DepthFormat::None,
+            { gl_engine::Framebuffer::ColourFormat::RGBA8 },
+            { resolution, resolution });
+        gl_engine::ShaderProgram quality_shader(R"(
+            out highp vec2 texcoords;
+            void main() {
+                highp vec2 vertices[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+                gl_Position = vec4(vertices[gl_VertexID], 0.0, 1.0);
+                texcoords = 0.5 * gl_Position.xy + vec2(0.5);
+            })",
+            R"(
+            uniform lowp sampler2DArray texture_sampler;
+            uniform highp float texture_layer;
+            in highp vec2 texcoords;
+            out lowp vec4 out_color;
+            void main() {
+                out_color = textureLod(texture_sampler, vec3(texcoords.x, 1.0 - texcoords.y, texture_layer), 0.0);
+            })",
+            gl_engine::ShaderCodeSource::PLAINTEXT);
+
+        const auto reconstruct = [&](unsigned layer) {
+            auto* functions = QOpenGLContext::currentContext()->extraFunctions();
+            quality_framebuffer.bind();
+            functions->glViewport(0, 0, resolution, resolution);
+            functions->glDisable(GL_BLEND);
+            functions->glDisable(GL_CULL_FACE);
+            functions->glDisable(GL_DEPTH_TEST);
+            functions->glDisable(GL_SCISSOR_TEST);
+            functions->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            quality_shader.bind();
+            destination.bind(0);
+            quality_shader.set_uniform("texture_sampler", 0);
+            quality_shader.set_uniform("texture_layer", float(layer));
+            sampling_geometry.draw();
+            quality_shader.release();
+            return quality_framebuffer.read_colour_attachment(0);
+        };
+
+        for (auto& algorithm : algorithms) {
+            if (algorithm.operation != Operation::Compression || algorithm.checksum)
+                continue;
+            QualityAccumulator accumulator;
+            for (size_t source_offset = 0; source_offset < m_sources.size(); source_offset += batch_size) {
+                Q_ASSERT(source_offset + batch_size <= m_sources.size());
+                std::vector<Raster> selected_sources;
+                selected_sources.reserve(batch_size);
+                for (size_t layer = 0; layer < batch_size; ++layer)
+                    selected_sources.push_back(m_sources[source_offset + layer]);
+                static_cast<void>(compressor.compress(
+                    selected_sources, destination, destination_layers, algorithm.settings));
+                for (unsigned layer = 0; layer < batch_size; ++layer) {
+                    accumulate_quality(accumulator,
+                        reconstruct(layer),
+                        selected_sources[layer],
+                        quality_references[source_offset + layer]);
+                }
+            }
+            algorithm.quality = quality_metrics(accumulator);
+            qInfo().noquote() << QStringLiteral("Completed quality metrics for %1").arg(QString::fromStdString(algorithm.name));
+        }
+        gl_engine::Framebuffer::unbind();
+
         const auto sampling_iterator = std::ranges::find_if(
             algorithms, [](const Algorithm& algorithm) { return algorithm.operation == Operation::SamplingOnly; });
         const auto checksum_iterator = std::ranges::find_if(
@@ -380,11 +622,14 @@ private:
         report << "\nAll values are milliseconds per batch. Mean SD is estimated from " << repetitions
                << " repetition means (" << measured_batches << " batches each): sample SD / sqrt("
                << repetitions << ").\n"
+               << "Quality is an untimed pass over all " << m_sources.size()
+               << " source textures at mip level 0 (512x512). PSNR uses linear RGB; SSIM uses sRGB luma.\n"
                << std::left << std::setw(29) << "algorithm"
                << std::right << std::setw(12) << "raw mean" << std::setw(14) << "raw mean SD"
                << std::setw(8) << "n" << std::setw(17) << "minus sample"
                << std::setw(18) << "adjusted mean SD" << std::setw(17) << "encoding only"
-               << std::setw(18) << "encoding mean SD" << '\n';
+               << std::setw(18) << "encoding mean SD" << std::setw(13) << "PSNR (dB)"
+               << std::setw(11) << "SSIM" << '\n';
 
         for (const auto& algorithm : algorithms) {
             std::vector<double> sampling_subtracted;
@@ -407,6 +652,13 @@ private:
                 report << std::setw(17) << "n/a" << std::setw(18) << "n/a";
             } else {
                 report << std::setw(17) << encoding.mean << std::setw(18) << encoding.mean_standard_deviation;
+            }
+            if (algorithm.quality) {
+                report << std::setw(13) << std::setprecision(3) << algorithm.quality->psnr
+                       << std::setw(11) << std::setprecision(6) << algorithm.quality->ssim
+                       << std::setprecision(3);
+            } else {
+                report << std::setw(13) << "n/a" << std::setw(11) << "n/a";
             }
             report << '\n';
         }

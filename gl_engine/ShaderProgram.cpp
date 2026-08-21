@@ -249,7 +249,10 @@ void ShaderProgram::set_uniform(const std::string& name, int value)
 
 void ShaderProgram::set_uniform(const std::string& name, unsigned value)
 {
-    set_uniform_template(name, value);
+    if (!m_cached_uniforms.contains(name))
+        m_cached_uniforms[name] = m_q_shader_program->uniformLocation(name.c_str());
+
+    QOpenGLContext::currentContext()->extraFunctions()->glUniform1ui(m_cached_uniforms.at(name), value);
 }
 
 void ShaderProgram::set_uniform(const std::string& name, float value)
