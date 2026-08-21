@@ -24,11 +24,13 @@ class TexturePreviewItem : public QQuickFramebufferObject {
     Q_PROPERTY(int previewEncoder READ previewEncoder WRITE setPreviewEncoder NOTIFY previewEncoderChanged)
     Q_PROPERTY(QStringList previewEncoders READ previewEncoders NOTIFY previewResultsChanged)
     Q_PROPERTY(QString previewName READ previewName NOTIFY previewDetailsChanged)
+    Q_PROPERTY(QString previewDescription READ previewDescription NOTIFY previewDetailsChanged)
     Q_PROPERTY(double previewPsnr READ previewPsnr NOTIFY previewDetailsChanged)
 
 public:
     struct PreviewResult {
         QString name;
+        QString description;
         double psnr = 0.0;
     };
 
@@ -42,6 +44,7 @@ public:
     void setPreviewEncoder(int value);
     [[nodiscard]] QStringList previewEncoders() const;
     [[nodiscard]] QString previewName() const;
+    [[nodiscard]] QString previewDescription() const;
     [[nodiscard]] double previewPsnr() const;
 
 signals:

@@ -34,12 +34,26 @@ ApplicationWindow {
             wrapMode: Text.Wrap
         }
 
-        ComboBox {
+        GridLayout {
             Layout.fillWidth: true
-            model: preview.previewEncoders
-            currentIndex: preview.previewEncoder
-            enabled: preview.ready
-            onActivated: preview.previewEncoder = currentIndex
+            columns: width >= 760 ? 9 : width >= 500 ? 5 : 3
+            columnSpacing: 6
+            rowSpacing: 6
+
+            Repeater {
+                model: preview.previewEncoders
+
+                Button {
+                    required property int index
+                    required property string modelData
+
+                    Layout.fillWidth: true
+                    text: modelData
+                    enabled: preview.ready
+                    highlighted: preview.previewEncoder === index
+                    onClicked: preview.previewEncoder = index
+                }
+            }
         }
 
         Item {
@@ -89,14 +103,56 @@ ApplicationWindow {
             }
         }
 
-        Label {
+        RowLayout {
             Layout.fillWidth: true
-            text: preview.ready
-                ? (Number.isFinite(preview.previewPsnr)
-                    ? qsTr("%1 — PSNR: %2 dB").arg(preview.previewName).arg(preview.previewPsnr.toFixed(2))
-                    : qsTr("%1 — PSNR: ∞").arg(preview.previewName))
-                : ""
-            wrapMode: Text.Wrap
+
+            Label {
+                Layout.fillWidth: true
+                text: preview.ready
+                    ? (Number.isFinite(preview.previewPsnr)
+                        ? qsTr("%1 — PSNR: %2 dB").arg(preview.previewName).arg(preview.previewPsnr.toFixed(2))
+                        : qsTr("%1 — PSNR: ∞").arg(preview.previewName))
+                    : ""
+                wrapMode: Text.Wrap
+            }
+
+            Button {
+                text: qsTr("Description")
+                enabled: preview.ready
+                onClicked: {
+                    if (descriptionDialogLoader.status === Loader.Ready)
+                        descriptionDialogLoader.item.open()
+                    else
+                        descriptionDialogLoader.active = true
+                }
+            }
+        }
+    }
+
+    Loader {
+        id: descriptionDialogLoader
+
+        active: false
+        asynchronous: true
+        onLoaded: {
+            if (status === Loader.Ready)
+                item.open()
+        }
+
+        sourceComponent: Component {
+            Dialog {
+                parent: Overlay.overlay
+                anchors.centerIn: parent
+                width: Math.min(root.width - 40, 560)
+                modal: true
+                title: preview.previewName
+                standardButtons: Dialog.Close
+
+                contentItem: Label {
+                    text: preview.previewDescription
+                    wrapMode: Text.Wrap
+                }
+            }
         }
     }
 }

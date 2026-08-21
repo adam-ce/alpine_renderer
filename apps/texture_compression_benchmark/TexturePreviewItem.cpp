@@ -141,35 +141,48 @@ QImage reconstruct(gl_engine::Texture& texture, unsigned resolution, unsigned la
     return result;
 }
 
-constexpr std::array<gl_engine::TextureCompressor::Encoder, 5> gpu_encoders {
-    gl_engine::TextureCompressor::Encoder::Search,
-    gl_engine::TextureCompressor::Encoder::FastRange,
-    gl_engine::TextureCompressor::Encoder::FastSplit,
-    gl_engine::TextureCompressor::Encoder::FastSplitFused,
-    gl_engine::TextureCompressor::Encoder::FastSplitBounds,
+struct GpuPreview {
+    const char* name;
+    const char* description;
+    gl_engine::TextureCompressor::Encoder encoder;
+    unsigned effort;
 };
 
-QString gpuEncoderName(gl_engine::TextureCompressor::Encoder encoder)
-{
-    switch (encoder) {
-    case gl_engine::TextureCompressor::Encoder::Search:
-        return QStringLiteral("GPU Search (reference)");
-    case gl_engine::TextureCompressor::Encoder::FastRange:
-        return QStringLiteral("GPU Fast range");
-    case gl_engine::TextureCompressor::Encoder::FastSplit:
-        return QStringLiteral("GPU Fast split");
-    case gl_engine::TextureCompressor::Encoder::FastSplitFused:
-        return QStringLiteral("GPU Fast split fused");
-    case gl_engine::TextureCompressor::Encoder::FastSplitBounds:
-        return QStringLiteral("GPU Fast split bounds");
-    }
-    return {};
-}
+constexpr std::array<GpuPreview, 7> gpu_previews { {
+    { "Search 0",
+        "Tests the average block colour with every ETC1 modifier table and keeps the lowest-error result.",
+        gl_engine::TextureCompressor::Encoder::Search,
+        0 },
+    { "search 4",
+        "Tests five base colours around the block average with every ETC1 modifier table and keeps the lowest-error result.",
+        gl_engine::TextureCompressor::Encoder::Search,
+        4 },
+    { "search 10",
+        "Tests eleven base colours around the block average with every ETC1 modifier table and keeps the lowest-error result.",
+        gl_engine::TextureCompressor::Encoder::Search,
+        10 },
+    { "range",
+        "Derives one ETC1 base colour, modifier table, and pixel indices from the whole block's colour and brightness range.",
+        gl_engine::TextureCompressor::Encoder::FastRange,
+        0 },
+    { "split",
+        "Encodes vertical and horizontal two-sub-block layouts separately, then keeps the layout with the lower reconstruction error.",
+        gl_engine::TextureCompressor::Encoder::FastSplit,
+        0 },
+    { "split fused",
+        "Evaluates both two-sub-block layouts like split, but gathers their statistics and indices in shared shader loops.",
+        gl_engine::TextureCompressor::Encoder::FastSplitFused,
+        0 },
+    { "split bounds",
+        "Uses the sub-block colour bounds to choose an orientation first, then encodes only the selected layout.",
+        gl_engine::TextureCompressor::Encoder::FastSplitBounds,
+        0 },
+} };
 
 constexpr size_t uncompressed_preview_index = 0;
 constexpr size_t goofy_preview_index = 1;
 constexpr size_t first_gpu_preview_index = 2;
-constexpr size_t preview_count = first_gpu_preview_index + gpu_encoders.size();
+constexpr size_t preview_count = first_gpu_preview_index + gpu_previews.size();
 } // namespace
 
 class TexturePreviewRenderer final : public QQuickFramebufferObject::Renderer {
@@ -215,7 +228,6 @@ private:
     QString generateTextures()
     {
         constexpr unsigned resolution = 512;
-        constexpr unsigned effort = 4;
         if (m_source_images.size() != tile_groups.size())
             return QStringLiteral("Preview imagery is incomplete.");
         if (!gl_engine::TextureCompressor::is_supported())
@@ -251,16 +263,21 @@ private:
         m_preview_textures[uncompressed_preview_index] = create_texture(gl_engine::Texture::Format::SRGBA8);
         for (size_t layer = 0; layer < sources.size(); ++layer)
             m_preview_textures[uncompressed_preview_index]->upload(sources[layer], unsigned(layer));
-        m_preview_results.push_back({ QStringLiteral("Uncompressed reference"), std::numeric_limits<double>::infinity() });
+        m_preview_results.push_back({ QStringLiteral("Ref"),
+            QStringLiteral("The original uncompressed texture array used as the visual and PSNR reference."),
+            std::numeric_limits<double>::infinity() });
 
         m_preview_textures[goofy_preview_index] = create_texture(gl_engine::Texture::Format::CompressedRGBA8);
         for (size_t layer = 0; layer < sources.size(); ++layer) {
             const auto compressed = nucleus::utils::generate_mipmapped_colour_texture(sources[layer], algorithm);
             m_preview_textures[goofy_preview_index]->upload(compressed, unsigned(layer));
         }
-        m_preview_results.push_back({ QStringLiteral("Goofy CPU reference"), psnr(*m_preview_textures[goofy_preview_index]) });
+        m_preview_results.push_back({ QStringLiteral("Goofy"),
+            QStringLiteral("CPU reference compressed by Goofy into the device's active ETC1 or DXT1 block format."),
+            psnr(*m_preview_textures[goofy_preview_index]) });
 
-        for (size_t i = 0; i < gpu_encoders.size(); ++i) {
+        for (size_t i = 0; i < gpu_previews.size(); ++i) {
+            const auto& preview = gpu_previews[i];
             auto& texture = m_preview_textures[first_gpu_preview_index + i];
             texture = create_texture(gl_engine::Texture::Format::CompressedRGBA8);
             gl_engine::TextureCompressor compressor(resolution, resolution, unsigned(sources.size()));
@@ -269,11 +286,12 @@ private:
                 layers,
                 {
                     .algorithm = algorithm,
-                    .effort = effort,
-                    .encoder = gpu_encoders[i],
+                    .effort = preview.effort,
+                    .encoder = preview.encoder,
                     .generate_mipmaps = true,
                 }));
-            m_preview_results.push_back({ gpuEncoderName(gpu_encoders[i]), psnr(*texture) });
+            m_preview_results.push_back(
+                { QString::fromLatin1(preview.name), QString::fromLatin1(preview.description), psnr(*texture) });
         }
         return {};
     }
@@ -377,6 +395,11 @@ QStringList TexturePreviewItem::previewEncoders() const
 QString TexturePreviewItem::previewName() const
 {
     return ready() ? m_preview_results[size_t(m_preview_encoder)].name : QString {};
+}
+
+QString TexturePreviewItem::previewDescription() const
+{
+    return ready() ? m_preview_results[size_t(m_preview_encoder)].description : QString {};
 }
 
 double TexturePreviewItem::previewPsnr() const
