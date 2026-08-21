@@ -25,11 +25,7 @@
 #include <QtAssert>
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
-#include <tuple>
-#include <unordered_map>
-#include <utility>
 #ifdef __EMSCRIPTEN__
 #include <emscripten/html5_webgl.h>
 #endif
@@ -386,293 +382,6 @@ float gl_engine::Texture::max_anisotropy()
 #endif
 }
 
-namespace {
-template <typename Callable> gl_engine::TextureCompressor::StageTiming measure_gl(Callable&& callable, bool finish)
-{
-    const auto start = std::chrono::steady_clock::now();
-    std::forward<Callable>(callable)();
-    const auto submitted = std::chrono::steady_clock::now();
-    if (!finish) {
-        return {
-            std::chrono::duration<double, std::milli>(submitted - start).count(),
-            0.0,
-        };
-    }
-    QOpenGLContext::currentContext()->extraFunctions()->glFinish();
-    const auto completed = std::chrono::steady_clock::now();
-    return {
-        std::chrono::duration<double, std::milli>(submitted - start).count(),
-        std::chrono::duration<double, std::milli>(completed - submitted).count(),
-    };
-}
-}
-
-double gl_engine::TextureCompressor::GpuTimings::total_ms() const
-{
-    return scratch_upload_ms + mipmap_generation_ms + compression_pass_ms + packing_pass_ms + output_transfer_ms
-        + compressed_upload_ms;
-}
-
-struct gl_engine::TextureCompressor::GpuTimer::Impl {
-    static constexpr GLenum time_elapsed = 0x88BF; // GL_TIME_ELAPSED_EXT
-    static constexpr GLenum gpu_disjoint = 0x8FBB; // GL_GPU_DISJOINT_EXT
-    static constexpr size_t stage_count = 6;
-
-    struct Sample {
-        std::array<GLuint, stage_count> queries {};
-        std::array<bool, stage_count> used {};
-    };
-
-    bool supported = false;
-    bool uses_extension_functions = false;
-    uint64_t next_ticket = 1;
-    uint64_t active_ticket = 0;
-    std::optional<Stage> active_stage;
-    std::unordered_map<uint64_t, Sample> samples;
-
-#if defined(__ANDROID__)
-    using GenQueries = void (*)(GLsizei, GLuint*);
-    using DeleteQueries = void (*)(GLsizei, const GLuint*);
-    using BeginQuery = void (*)(GLenum, GLuint);
-    using EndQuery = void (*)(GLenum);
-    using GetQueryObjectuiv = void (*)(GLuint, GLenum, GLuint*);
-    using GetQueryObjectui64v = void (*)(GLuint, GLenum, GLuint64*);
-    GenQueries gen_queries = nullptr;
-    DeleteQueries delete_queries = nullptr;
-    BeginQuery begin_query = nullptr;
-    EndQuery end_query = nullptr;
-    GetQueryObjectuiv get_query_object_uiv = nullptr;
-    GetQueryObjectui64v get_query_object_ui64v = nullptr;
-#endif
-
-    Impl()
-    {
-        auto* context = QOpenGLContext::currentContext();
-        if (!context)
-            return;
-#if defined(__EMSCRIPTEN__)
-        const auto webgl_context = emscripten_webgl_get_current_context();
-        supported = webgl_context && emscripten_webgl_enable_extension(webgl_context, "EXT_disjoint_timer_query_webgl2");
-#elif defined(__ANDROID__)
-        supported = context->hasExtension(QByteArrayLiteral("GL_EXT_disjoint_timer_query"));
-        if (!supported)
-            return;
-        gen_queries = reinterpret_cast<GenQueries>(context->getProcAddress("glGenQueriesEXT"));
-        delete_queries = reinterpret_cast<DeleteQueries>(context->getProcAddress("glDeleteQueriesEXT"));
-        begin_query = reinterpret_cast<BeginQuery>(context->getProcAddress("glBeginQueryEXT"));
-        end_query = reinterpret_cast<EndQuery>(context->getProcAddress("glEndQueryEXT"));
-        get_query_object_uiv = reinterpret_cast<GetQueryObjectuiv>(context->getProcAddress("glGetQueryObjectuivEXT"));
-        get_query_object_ui64v = reinterpret_cast<GetQueryObjectui64v>(context->getProcAddress("glGetQueryObjectui64vEXT"));
-        supported = gen_queries && delete_queries && begin_query && end_query && get_query_object_uiv && get_query_object_ui64v;
-        uses_extension_functions = supported;
-#else
-        const auto format = context->format();
-        supported = format.majorVersion() > 3 || (format.majorVersion() == 3 && format.minorVersion() >= 3)
-            || context->hasExtension(QByteArrayLiteral("GL_ARB_timer_query"));
-#endif
-    }
-
-    void gen_query(GLuint* query)
-    {
-#if defined(__EMSCRIPTEN__)
-        glGenQueries(1, query);
-        return;
-#endif
-#if defined(__ANDROID__)
-        if (uses_extension_functions) {
-            gen_queries(1, query);
-            return;
-        }
-#endif
-        QOpenGLContext::currentContext()->extraFunctions()->glGenQueries(1, query);
-    }
-
-    void delete_query(GLuint query)
-    {
-        if (!query)
-            return;
-#if defined(__EMSCRIPTEN__)
-        glDeleteQueries(1, &query);
-        return;
-#endif
-#if defined(__ANDROID__)
-        if (uses_extension_functions) {
-            delete_queries(1, &query);
-            return;
-        }
-#endif
-        QOpenGLContext::currentContext()->extraFunctions()->glDeleteQueries(1, &query);
-    }
-
-    void begin(GLuint query)
-    {
-#if defined(__EMSCRIPTEN__)
-        glBeginQuery(time_elapsed, query);
-        return;
-#endif
-#if defined(__ANDROID__)
-        if (uses_extension_functions) {
-            begin_query(time_elapsed, query);
-            return;
-        }
-#endif
-        QOpenGLContext::currentContext()->extraFunctions()->glBeginQuery(time_elapsed, query);
-    }
-
-    void end()
-    {
-#if defined(__EMSCRIPTEN__)
-        glEndQuery(time_elapsed);
-        return;
-#endif
-#if defined(__ANDROID__)
-        if (uses_extension_functions) {
-            end_query(time_elapsed);
-            return;
-        }
-#endif
-        QOpenGLContext::currentContext()->extraFunctions()->glEndQuery(time_elapsed);
-    }
-
-    void get_query_uiv(GLuint query, GLenum parameter, GLuint* value)
-    {
-#if defined(__EMSCRIPTEN__)
-        glGetQueryObjectuiv(query, parameter, value);
-        return;
-#endif
-#if defined(__ANDROID__)
-        if (uses_extension_functions) {
-            get_query_object_uiv(query, parameter, value);
-            return;
-        }
-#endif
-        QOpenGLContext::currentContext()->extraFunctions()->glGetQueryObjectuiv(query, parameter, value);
-    }
-
-    void get_query_result(GLuint query, GLuint64* value)
-    {
-#if defined(__EMSCRIPTEN__)
-        GLuint result = 0;
-        glGetQueryObjectuiv(query, GL_QUERY_RESULT, &result);
-        *value = result;
-#elif defined(__ANDROID__)
-        get_query_object_ui64v(query, GL_QUERY_RESULT, value);
-#else
-        GLuint result = 0;
-        QOpenGLContext::currentContext()->extraFunctions()->glGetQueryObjectuiv(query, GL_QUERY_RESULT, &result);
-        *value = result;
-#endif
-    }
-
-    void delete_sample(Sample& sample)
-    {
-        for (const auto query : sample.queries)
-            delete_query(query);
-    }
-};
-
-gl_engine::TextureCompressor::GpuTimer::GpuTimer()
-    : m(std::make_unique<Impl>())
-{
-}
-
-gl_engine::TextureCompressor::GpuTimer::~GpuTimer()
-{
-    if (!QOpenGLContext::currentContext())
-        return;
-    for (auto& [ticket, sample] : m->samples) {
-        static_cast<void>(ticket);
-        m->delete_sample(sample);
-    }
-}
-
-bool gl_engine::TextureCompressor::GpuTimer::is_supported() const { return m->supported; }
-
-uint64_t gl_engine::TextureCompressor::GpuTimer::begin_sample()
-{
-    if (!m->supported)
-        return 0;
-    Q_ASSERT(m->active_ticket == 0);
-    m->active_ticket = m->next_ticket++;
-    m->samples.emplace(m->active_ticket, Impl::Sample {});
-    return m->active_ticket;
-}
-
-void gl_engine::TextureCompressor::GpuTimer::begin_stage(Stage stage)
-{
-    if (!m->active_ticket)
-        return;
-    Q_ASSERT(!m->active_stage.has_value());
-    auto& sample = m->samples.at(m->active_ticket);
-    const auto index = size_t(stage);
-    Q_ASSERT(!sample.used[index]);
-    m->gen_query(&sample.queries[index]);
-    sample.used[index] = true;
-    m->begin(sample.queries[index]);
-    m->active_stage = stage;
-}
-
-void gl_engine::TextureCompressor::GpuTimer::end_stage()
-{
-    if (!m->active_ticket)
-        return;
-    Q_ASSERT(m->active_stage.has_value());
-    m->end();
-    m->active_stage.reset();
-}
-
-void gl_engine::TextureCompressor::GpuTimer::end_sample()
-{
-    if (!m->active_ticket)
-        return;
-    Q_ASSERT(!m->active_stage.has_value());
-    m->active_ticket = 0;
-}
-
-gl_engine::TextureCompressor::GpuTimer::PollStatus gl_engine::TextureCompressor::GpuTimer::poll(
-    uint64_t ticket, GpuTimings& timings)
-{
-    Q_ASSERT(ticket != 0);
-    const auto iterator = m->samples.find(ticket);
-    Q_ASSERT(iterator != m->samples.end());
-    GLint disjoint = GL_FALSE;
-#if defined(__EMSCRIPTEN__) || defined(__ANDROID__)
-    QOpenGLContext::currentContext()->extraFunctions()->glGetIntegerv(Impl::gpu_disjoint, &disjoint);
-#endif
-    if (disjoint) {
-        m->delete_sample(iterator->second);
-        m->samples.erase(iterator);
-        return PollStatus::Disjoint;
-    }
-
-    for (size_t index = 0; index < Impl::stage_count; ++index) {
-        if (!iterator->second.used[index])
-            continue;
-        GLuint available = GL_FALSE;
-        m->get_query_uiv(iterator->second.queries[index], GL_QUERY_RESULT_AVAILABLE, &available);
-        if (!available)
-            return PollStatus::Pending;
-    }
-
-    std::array<double, Impl::stage_count> milliseconds {};
-    for (size_t index = 0; index < Impl::stage_count; ++index) {
-        if (!iterator->second.used[index])
-            continue;
-        GLuint64 nanoseconds = 0;
-        m->get_query_result(iterator->second.queries[index], &nanoseconds);
-        milliseconds[index] = double(nanoseconds) / 1'000'000.0;
-    }
-    timings.scratch_upload_ms = milliseconds[size_t(Stage::ScratchUpload)];
-    timings.mipmap_generation_ms = milliseconds[size_t(Stage::MipmapGeneration)];
-    timings.compression_pass_ms = milliseconds[size_t(Stage::CompressionPass)];
-    timings.packing_pass_ms = milliseconds[size_t(Stage::PackingPass)];
-    timings.output_transfer_ms = milliseconds[size_t(Stage::OutputTransfer)];
-    timings.compressed_upload_ms = milliseconds[size_t(Stage::CompressedUpload)];
-    m->delete_sample(iterator->second);
-    m->samples.erase(iterator);
-    return PollStatus::Ready;
-}
-
 struct gl_engine::TextureCompressor::Impl {
     static constexpr unsigned max_shader_mip_levels = 16;
 
@@ -901,23 +610,8 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
     auto* f = QOpenGLContext::currentContext()->extraFunctions();
     Result result;
     result.mip_levels = settings.generate_mipmaps ? mip_level_count(m->width, m->height) : 1;
-    const bool finish_stages = settings.timing_mode == TimingMode::IndividualStages;
-    const bool finish_total = settings.timing_mode == TimingMode::EndToEnd;
-    const auto total_start = std::chrono::steady_clock::now();
-    auto* gpu_timer = settings.gpu_timer && settings.gpu_timer->is_supported() ? settings.gpu_timer : nullptr;
-    if (gpu_timer)
-        result.gpu_timing_ticket = gpu_timer->begin_sample();
-    const auto measure_stage = [&](GpuTimer::Stage stage, auto&& callable) {
-        return measure_gl([&]() {
-            if (gpu_timer)
-                gpu_timer->begin_stage(stage);
-            std::forward<decltype(callable)>(callable)();
-            if (gpu_timer)
-                gpu_timer->end_stage();
-        }, finish_stages);
-    };
 
-    result.timings.scratch_upload = measure_stage(GpuTimer::Stage::ScratchUpload, [&]() {
+    {
         f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
         f->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         for (size_t layer = 0; layer < textures.size(); ++layer) {
@@ -933,12 +627,10 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
                 GL_UNSIGNED_BYTE,
                 textures[layer].bytes().data());
         }
-    });
+    }
     if (settings.generate_mipmaps) {
-        result.timings.mipmap_generation = measure_stage(GpuTimer::Stage::MipmapGeneration, [&]() {
-            f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
-            f->glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
-        });
+        f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
+        f->glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
     }
 
     std::vector<size_t> level_offsets;
@@ -969,7 +661,7 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
     GLboolean depth_enabled = GL_FALSE;
     GLboolean scissor_enabled = GL_FALSE;
 
-    result.timings.compression_pass = measure_stage(GpuTimer::Stage::CompressionPass, [&]() {
+    {
         auto* program = m->dxt1_fragment_program.get();
         if (settings.algorithm == nucleus::utils::ColourTexture::Format::ETC1) {
             if (settings.encoder == Encoder::FastRange)
@@ -1014,9 +706,9 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
         f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
         f->glBindVertexArray(m->vertex_array);
         f->glDrawArrays(GL_TRIANGLES, 0, 3);
-    });
+    }
 
-    result.timings.packing_pass = measure_stage(GpuTimer::Stage::PackingPass, [&]() {
+    {
         f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m->packing_framebuffer);
         f->glViewport(0, 0, m->output_atlas_width, m->output_atlas_height);
         m->packing_program->bind();
@@ -1041,13 +733,9 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
         f->glColorMask(previous_colour_mask[0], previous_colour_mask[1], previous_colour_mask[2], previous_colour_mask[3]);
         f->glViewport(previous_viewport[0], previous_viewport[1], previous_viewport[2], previous_viewport[3]);
         f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(previous_draw_framebuffer));
-    });
-    result.timings.encoding.submission_ms
-        = result.timings.compression_pass.submission_ms + result.timings.packing_pass.submission_ms;
-    result.timings.encoding.completion_wait_ms
-        = result.timings.compression_pass.completion_wait_ms + result.timings.packing_pass.completion_wait_ms;
+    }
 
-    result.timings.output_transfer = measure_stage(GpuTimer::Stage::OutputTransfer, [&]() {
+    {
         GLint previous_read_framebuffer = 0;
         GLint previous_read_buffer = 0;
         GLint previous_pack_alignment = 0;
@@ -1063,9 +751,9 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
         f->glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
         f->glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(previous_read_framebuffer));
         f->glReadBuffer(GLenum(previous_read_buffer));
-    });
+    }
 
-    result.timings.compressed_upload = measure_stage(GpuTimer::Stage::CompressedUpload, [&]() {
+    {
         f->glBindTexture(GL_TEXTURE_2D_ARRAY, destination.m_id);
         f->glBindBuffer(GL_PIXEL_UNPACK_BUFFER, m->encoded_buffer);
         const auto format = Texture::compressed_texture_format();
@@ -1089,12 +777,7 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
             }
         }
         f->glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-    });
-    if (gpu_timer)
-        gpu_timer->end_sample();
+    }
     f->glActiveTexture(GL_TEXTURE0);
-    if (finish_total)
-        f->glFinish();
-    result.timings.total_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - total_start).count();
     return result;
 }
