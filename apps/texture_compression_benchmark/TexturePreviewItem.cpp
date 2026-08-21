@@ -119,7 +119,7 @@ struct GpuPreview {
     unsigned effort;
 };
 
-constexpr std::array<GpuPreview, 7> gpu_previews { {
+constexpr std::array<GpuPreview, 5> gpu_previews { {
     { "Search 0",
         "Tests the average block colour with every ETC1 modifier table and keeps the lowest-error result.",
         gl_engine::TextureCompressor::Encoder::Search,
@@ -132,16 +132,8 @@ constexpr std::array<GpuPreview, 7> gpu_previews { {
         "Tests eleven base colours around the block average with every ETC1 modifier table and keeps the lowest-error result.",
         gl_engine::TextureCompressor::Encoder::Search,
         10 },
-    { "range",
-        "Derives one ETC1 base colour, modifier table, and pixel indices from the whole block's colour and brightness range.",
-        gl_engine::TextureCompressor::Encoder::FastRange,
-        0 },
-    { "split",
-        "Encodes vertical and horizontal two-sub-block layouts separately, then keeps the layout with the lower reconstruction error.",
-        gl_engine::TextureCompressor::Encoder::FastSplit,
-        0 },
     { "split fused",
-        "Evaluates both two-sub-block layouts like split, but gathers their statistics and indices in shared shader loops.",
+        "Evaluates vertical and horizontal two-sub-block layouts while gathering their statistics and indices in shared shader loops.",
         gl_engine::TextureCompressor::Encoder::FastSplitFused,
         0 },
     { "split bounds",

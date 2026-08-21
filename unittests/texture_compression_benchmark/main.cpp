@@ -309,10 +309,8 @@ std::vector<Algorithm> supported_algorithms(Format format)
     result.push_back({ "sampling only", Operation::SamplingOnly, settings(Encoder::Checksum) });
     result.push_back({ "checksum", Operation::Compression, settings(Encoder::Checksum), true });
     if (format == Format::DXT1) {
-        result.push_back({ "DXT1", Operation::Compression, settings(Encoder::FastRange) });
+        result.push_back({ "DXT1", Operation::Compression, settings(Encoder::Dxt1) });
     } else if (format == Format::ETC1) {
-        result.push_back({ "ETC1 fast range", Operation::Compression, settings(Encoder::FastRange) });
-        result.push_back({ "ETC1 fast split", Operation::Compression, settings(Encoder::FastSplit) });
         result.push_back({ "ETC1 fast split fused", Operation::Compression, settings(Encoder::FastSplitFused) });
         result.push_back({ "ETC1 fast split bounds", Operation::Compression, settings(Encoder::FastSplitBounds) });
     }
