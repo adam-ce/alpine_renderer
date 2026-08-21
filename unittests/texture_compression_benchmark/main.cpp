@@ -53,7 +53,7 @@ constexpr unsigned batch_size = 4;
 constexpr unsigned framebuffer_size = 32;
 constexpr int warmup_batches = 2;
 constexpr int measured_batches = 10;
-constexpr int repetitions = 20;
+constexpr int repetitions = 200;
 constexpr uint32_t random_seed = 0x4a17c0deu;
 
 enum class Operation { SamplingOnly, Compression };
@@ -341,13 +341,16 @@ private:
                                            "Compression format: %4\n"
                                            "Random seed: 0x%5\n"
                                            "Batch: 4 x 512x512 base-level textures, with mipmaps\n"
-                                           "Schedule: 20 repetitions, 2 warm-up + 10 measured batches per algorithm\n"
+                                           "Schedule: %6 repetitions, %7 warm-up + %8 measured batches per algorithm\n"
                                            "Timer: steady-clock wall time through dependent one-pixel framebuffer readback\n")
-                                 .arg(QString::fromStdString(gl_string(GL_VENDOR)),
-                                     QString::fromStdString(gl_string(GL_RENDERER)),
-                                     QString::fromStdString(gl_string(GL_VERSION)),
-                                     QString::fromLatin1(format_name(format)),
-                                     QString::number(random_seed, 16));
+                                 .arg(QString::fromStdString(gl_string(GL_VENDOR)))
+                                 .arg(QString::fromStdString(gl_string(GL_RENDERER)))
+                                 .arg(QString::fromStdString(gl_string(GL_VERSION)))
+                                 .arg(QString::fromLatin1(format_name(format)))
+                                 .arg(QString::number(random_seed, 16))
+                                 .arg(repetitions)
+                                 .arg(warmup_batches)
+                                 .arg(measured_batches);
 
         std::vector<size_t> algorithm_order(algorithms.size());
         std::iota(algorithm_order.begin(), algorithm_order.end(), 0);
@@ -374,8 +377,9 @@ private:
             return false;
 
         std::ostringstream report;
-        report << "\nAll values are milliseconds per batch. Mean SD is estimated from 20 repetition means "
-                  "(10 batches each): sample SD / sqrt(20).\n"
+        report << "\nAll values are milliseconds per batch. Mean SD is estimated from " << repetitions
+               << " repetition means (" << measured_batches << " batches each): sample SD / sqrt("
+               << repetitions << ").\n"
                << std::left << std::setw(29) << "algorithm"
                << std::right << std::setw(12) << "raw mean" << std::setw(14) << "raw mean SD"
                << std::setw(8) << "n" << std::setw(17) << "minus sample"
