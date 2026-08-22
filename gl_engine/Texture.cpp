@@ -24,7 +24,6 @@
 #include <QOpenGLFunctions>
 #include <QtAssert>
 #include <algorithm>
-#include <array>
 #include <cmath>
 #ifdef __EMSCRIPTEN__
 #include <emscripten/html5_webgl.h>
@@ -385,46 +384,6 @@ float gl_engine::Texture::max_anisotropy()
 struct gl_engine::TextureCompressor::Impl {
     static constexpr unsigned max_shader_mip_levels = 16;
 
-    struct Etc1FastProgram {
-        Encoder encoder = Encoder::FastSplitFused;
-        std::unique_ptr<ShaderProgram> program;
-    };
-
-    struct Etc1FastProgramDefinition {
-        Encoder encoder;
-        const char* algorithm_define;
-        const char* index_define;
-    };
-
-    static constexpr std::array etc1_fast_program_definitions {
-        Etc1FastProgramDefinition { Encoder::FastSplitFused, "#define ALP_COMPRESS_ETC1_SPLIT_FUSED", nullptr },
-        Etc1FastProgramDefinition { Encoder::FastSplitFusedProjection,
-            "#define ALP_COMPRESS_ETC1_SPLIT_FUSED",
-            "#define ALP_ETC1_INDEX_PROJECTION" },
-        Etc1FastProgramDefinition { Encoder::FastSplitFusedProjectionClamped,
-            "#define ALP_COMPRESS_ETC1_SPLIT_FUSED",
-            "#define ALP_ETC1_INDEX_PROJECTION_CLAMPED" },
-        Etc1FastProgramDefinition { Encoder::FastSplitFusedExact,
-            "#define ALP_COMPRESS_ETC1_SPLIT_FUSED",
-            "#define ALP_ETC1_INDEX_EXACT" },
-        Etc1FastProgramDefinition { Encoder::FastSplitFusedExactTableSearch,
-            "#define ALP_COMPRESS_ETC1_SPLIT_FUSED",
-            "#define ALP_ETC1_INDEX_EXACT_TABLE_SEARCH" },
-        Etc1FastProgramDefinition { Encoder::FastSplitBounds, "#define ALP_COMPRESS_ETC1_SPLIT_BOUNDS", nullptr },
-        Etc1FastProgramDefinition { Encoder::FastSplitBoundsProjection,
-            "#define ALP_COMPRESS_ETC1_SPLIT_BOUNDS",
-            "#define ALP_ETC1_INDEX_PROJECTION" },
-        Etc1FastProgramDefinition { Encoder::FastSplitBoundsProjectionClamped,
-            "#define ALP_COMPRESS_ETC1_SPLIT_BOUNDS",
-            "#define ALP_ETC1_INDEX_PROJECTION_CLAMPED" },
-        Etc1FastProgramDefinition { Encoder::FastSplitBoundsExact,
-            "#define ALP_COMPRESS_ETC1_SPLIT_BOUNDS",
-            "#define ALP_ETC1_INDEX_EXACT" },
-        Etc1FastProgramDefinition { Encoder::FastSplitBoundsExactTableSearch,
-            "#define ALP_COMPRESS_ETC1_SPLIT_BOUNDS",
-            "#define ALP_ETC1_INDEX_EXACT_TABLE_SEARCH" },
-    };
-
     unsigned width = 0;
     unsigned height = 0;
     unsigned max_batch_size = 0;
@@ -442,7 +401,7 @@ struct gl_engine::TextureCompressor::Impl {
     GLuint packing_renderbuffer = 0;
     std::unique_ptr<ShaderProgram> dxt1_fragment_program;
     std::unique_ptr<ShaderProgram> etc1_fragment_program;
-    std::array<Etc1FastProgram, etc1_fast_program_definitions.size()> etc1_fast_programs;
+    std::unique_ptr<ShaderProgram> etc1_fast_split_fused_exact_fragment_program;
     std::unique_ptr<ShaderProgram> checksum_fragment_program;
     std::unique_ptr<ShaderProgram> packing_program;
 
@@ -526,20 +485,10 @@ struct gl_engine::TextureCompressor::Impl {
             "texture_compress.vert",
             ShaderCodeSource::FILE,
             std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1") });
-        for (size_t i = 0; i < etc1_fast_program_definitions.size(); ++i) {
-            const auto& definition = etc1_fast_program_definitions[i];
-            std::vector<QString> defines {
-                QStringLiteral("#define ALP_COMPRESS_ETC1"),
-                QString::fromLatin1(definition.algorithm_define),
-            };
-            if (definition.index_define)
-                defines.push_back(QString::fromLatin1(definition.index_define));
-            etc1_fast_programs[i] = {
-                definition.encoder,
-                std::make_unique<ShaderProgram>(
-                    "texture_compress_raster.vert", "texture_compress.vert", ShaderCodeSource::FILE, defines),
-            };
-        }
+        etc1_fast_split_fused_exact_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
+            "texture_compress.vert",
+            ShaderCodeSource::FILE,
+            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1"), QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED") });
         checksum_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
             "texture_compress.vert",
             ShaderCodeSource::FILE,
@@ -553,8 +502,7 @@ struct gl_engine::TextureCompressor::Impl {
     {
         dxt1_fragment_program.reset();
         etc1_fragment_program.reset();
-        for (auto& fast_program : etc1_fast_programs)
-            fast_program.program.reset();
+        etc1_fast_split_fused_exact_fragment_program.reset();
         checksum_fragment_program.reset();
         packing_program.reset();
         if (!QOpenGLContext::currentContext())
@@ -706,10 +654,8 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
             program = m->checksum_fragment_program.get();
         } else if (settings.algorithm == nucleus::utils::ColourTexture::Format::ETC1) {
             program = m->etc1_fragment_program.get();
-            const auto fast_program = std::ranges::find(
-                m->etc1_fast_programs, settings.encoder, &Impl::Etc1FastProgram::encoder);
-            if (fast_program != m->etc1_fast_programs.end())
-                program = fast_program->program.get();
+            if (settings.encoder == Encoder::FastSplitFusedExact)
+                program = m->etc1_fast_split_fused_exact_fragment_program.get();
         }
         f->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_framebuffer);
         f->glGetIntegerv(GL_VIEWPORT, previous_viewport);

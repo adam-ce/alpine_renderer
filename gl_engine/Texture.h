@@ -94,16 +94,7 @@ public:
     enum class Encoder {
         Search,
         Dxt1,
-        FastSplitFused,
-        FastSplitFusedProjection,
-        FastSplitFusedProjectionClamped,
         FastSplitFusedExact,
-        FastSplitFusedExactTableSearch,
-        FastSplitBounds,
-        FastSplitBoundsProjection,
-        FastSplitBoundsProjectionClamped,
-        FastSplitBoundsExact,
-        FastSplitBoundsExactTableSearch,
         Checksum
     };
 
