@@ -202,6 +202,74 @@ FastEtc1Bases fast_split_bases(FastEtc1Subblock first, FastEtc1Subblock second)
         0u);
 }
 
+struct FastEtc1Evaluation {
+    highp uint indices;
+    highp uint error;
+    highp ivec3 first_residual;
+    highp ivec3 second_residual;
+};
+
+FastEtc1Evaluation evaluate_fast_split(highp uvec3 pixels[16],
+    FastEtc1Subblock first,
+    FastEtc1Subblock second,
+    FastEtc1Bases bases,
+    bool horizontal)
+{
+    highp uint indices = 0u;
+    highp uint total_error = 0u;
+    highp ivec3 first_residual = ivec3(0);
+    highp ivec3 second_residual = ivec3(0);
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            highp int pixel_index = y * 4 + x;
+            highp uvec3 pixel = pixels[pixel_index];
+            bool second_subblock = horizontal ? y >= 2 : x >= 2;
+            highp int table = second_subblock ? second.table : first.table;
+            highp ivec3 base = second_subblock ? bases.second_decoded : bases.first_decoded;
+            highp uint selected = select_etc1_modifier_exact(pixel, base, table);
+            highp ivec3 reconstructed = clamp(base + ivec3(modifier(table, int(selected))), ivec3(0), ivec3(255));
+            highp ivec3 delta = ivec3(pixel) - reconstructed;
+            total_error += uint(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+#if defined(ALP_COMPRESS_ETC1_REFINE_RESIDUAL) || defined(ALP_COMPRESS_ETC1_REFINE_SHARED_RESIDUAL)
+            if (second_subblock)
+                second_residual += delta;
+            else
+                first_residual += delta;
+#endif
+
+            highp uint bit_position = uint(x * 4 + y);
+            indices |= (selected & 1u) << bit_position;
+            indices |= (selected >> 1u) << (bit_position + 16u);
+        }
+    }
+    return FastEtc1Evaluation(indices, total_error, first_residual, second_residual);
+}
+
+highp uvec2 pack_fast_split(FastEtc1Evaluation evaluation,
+    FastEtc1Subblock first,
+    FastEtc1Subblock second,
+    FastEtc1Bases bases,
+    bool horizontal)
+{
+    highp uint control = uint(first.table) << 5u | uint(second.table) << 2u | bases.differential_bit;
+    if (horizontal)
+        control |= 1u;
+    return uvec2(bases.header | control << 24u, byte_swap(evaluation.indices));
+}
+
+FastEtc1Subblock refit_fast_subblock(
+    FastEtc1Subblock subblock, highp ivec3 decoded_base, highp ivec3 residual, highp int pixel_count)
+{
+    highp ivec3 rounded_residual = ivec3(0);
+    for (int channel = 0; channel < 3; ++channel) {
+        highp int value = residual[channel];
+        highp int rounding = pixel_count / 2;
+        rounded_residual[channel]
+            = value >= 0 ? (value + rounding) / pixel_count : -((-value + rounding) / pixel_count);
+    }
+    return FastEtc1Subblock(clamp(decoded_base + rounded_residual, ivec3(0), ivec3(255)), subblock.table);
+}
+
 highp uvec2 encode_etc1_fast_split_fused(highp uvec3 pixels[16])
 {
     highp uvec3 left_minimum = uvec3(255u);
@@ -246,52 +314,50 @@ highp uvec2 encode_etc1_fast_split_fused(highp uvec3 pixels[16])
     FastEtc1Subblock bottom = fast_subblock_from_statistics(bottom_minimum, bottom_maximum, bottom_sum);
     FastEtc1Bases vertical_bases = fast_split_bases(left, right);
     FastEtc1Bases horizontal_bases = fast_split_bases(top, bottom);
+    FastEtc1Evaluation vertical_evaluation = evaluate_fast_split(pixels, left, right, vertical_bases, false);
+    FastEtc1Evaluation horizontal_evaluation = evaluate_fast_split(pixels, top, bottom, horizontal_bases, true);
+    highp uvec2 vertical = pack_fast_split(vertical_evaluation, left, right, vertical_bases, false);
+    highp uvec2 horizontal = pack_fast_split(horizontal_evaluation, top, bottom, horizontal_bases, true);
 
-    highp uint vertical_indices = 0u;
-    highp uint horizontal_indices = 0u;
-    highp uint vertical_error = 0u;
-    highp uint horizontal_error = 0u;
-    for (int y = 0; y < 4; ++y) {
-        for (int x = 0; x < 4; ++x) {
-            highp int pixel_index = y * 4 + x;
-            highp uvec3 pixel = pixels[pixel_index];
-            bool use_right = x >= 2;
-            bool use_bottom = y >= 2;
-
-            highp int vertical_table = use_right ? right.table : left.table;
-            highp ivec3 vertical_base = use_right ? vertical_bases.second_decoded : vertical_bases.first_decoded;
-            highp uint vertical_selected = select_etc1_modifier_exact(pixel, vertical_base, vertical_table);
-            highp ivec3 vertical_reconstructed
-                = clamp(vertical_base + ivec3(modifier(vertical_table, int(vertical_selected))), ivec3(0), ivec3(255));
-            highp ivec3 vertical_delta = ivec3(pixel) - vertical_reconstructed;
-            vertical_error += uint(vertical_delta.x * vertical_delta.x + vertical_delta.y * vertical_delta.y + vertical_delta.z * vertical_delta.z);
-
-            highp int horizontal_table = use_bottom ? bottom.table : top.table;
-            highp ivec3 horizontal_base = use_bottom ? horizontal_bases.second_decoded : horizontal_bases.first_decoded;
-            highp uint horizontal_selected = select_etc1_modifier_exact(pixel, horizontal_base, horizontal_table);
-            highp ivec3 horizontal_reconstructed
-                = clamp(horizontal_base + ivec3(modifier(horizontal_table, int(horizontal_selected))), ivec3(0), ivec3(255));
-            highp ivec3 horizontal_delta = ivec3(pixel) - horizontal_reconstructed;
-            horizontal_error += uint(horizontal_delta.x * horizontal_delta.x + horizontal_delta.y * horizontal_delta.y + horizontal_delta.z * horizontal_delta.z);
-
-            highp uint bit_position = uint(x * 4 + y);
-            vertical_indices |= (vertical_selected & 1u) << bit_position;
-            vertical_indices |= (vertical_selected >> 1u) << (bit_position + 16u);
-            horizontal_indices |= (horizontal_selected & 1u) << bit_position;
-            horizontal_indices |= (horizontal_selected >> 1u) << (bit_position + 16u);
-        }
+#if !defined(ALP_COMPRESS_ETC1_REFINE_RESIDUAL) && !defined(ALP_COMPRESS_ETC1_REFINE_SHARED_RESIDUAL)
+    return horizontal_evaluation.error < vertical_evaluation.error ? horizontal : vertical;
+#else
+    bool horizontal_wins = horizontal_evaluation.error < vertical_evaluation.error;
+    FastEtc1Subblock first = left;
+    FastEtc1Subblock second = right;
+    FastEtc1Bases best_bases = vertical_bases;
+    FastEtc1Evaluation best_evaluation = vertical_evaluation;
+    highp uvec2 best_block = vertical;
+    if (horizontal_wins) {
+        first = top;
+        second = bottom;
+        best_bases = horizontal_bases;
+        best_evaluation = horizontal_evaluation;
+        best_block = horizontal;
     }
+#ifdef ALP_COMPRESS_ETC1_REFINE_SHARED_RESIDUAL
+    highp ivec3 combined_residual = best_evaluation.first_residual + best_evaluation.second_residual;
+    FastEtc1Subblock candidate_first
+        = refit_fast_subblock(first, best_bases.first_decoded, combined_residual, 16);
+    FastEtc1Subblock candidate_second
+        = refit_fast_subblock(second, best_bases.second_decoded, combined_residual, 16);
+#else
+    FastEtc1Subblock candidate_first
+        = refit_fast_subblock(first, best_bases.first_decoded, best_evaluation.first_residual, 8);
+    FastEtc1Subblock candidate_second
+        = refit_fast_subblock(second, best_bases.second_decoded, best_evaluation.second_residual, 8);
+#endif
+    FastEtc1Bases candidate_bases = fast_split_bases(candidate_first, candidate_second);
+    FastEtc1Evaluation candidate_evaluation
+        = evaluate_fast_split(pixels, candidate_first, candidate_second, candidate_bases, horizontal_wins);
+    if (candidate_evaluation.error < best_evaluation.error)
+        best_block = pack_fast_split(candidate_evaluation, candidate_first, candidate_second, candidate_bases, horizontal_wins);
 
-    highp uint vertical_control
-        = uint(left.table) << 5u | uint(right.table) << 2u | vertical_bases.differential_bit;
-    highp uint horizontal_control
-        = uint(top.table) << 5u | uint(bottom.table) << 2u | horizontal_bases.differential_bit | 1u;
-    highp uvec2 vertical = uvec2(vertical_bases.header | vertical_control << 24u, byte_swap(vertical_indices));
-    highp uvec2 horizontal = uvec2(horizontal_bases.header | horizontal_control << 24u, byte_swap(horizontal_indices));
-    return horizontal_error < vertical_error ? horizontal : vertical;
+    return best_block;
+#endif
 }
 
-highp uvec2 encode_etc1(highp uvec3 pixels[16])
+highp uvec2 encode_etc1(highp uvec3 pixels[16], highp int search_effort)
 {
     highp uvec3 sum = uvec3(0u);
     for (int i = 0; i < 16; ++i)
@@ -303,7 +369,7 @@ highp uvec2 encode_etc1(highp uvec3 pixels[16])
     highp uint best_table = 0u;
     highp uint best_indices = 0u;
     for (int candidate = 0; candidate <= 10; ++candidate) {
-        if (candidate > effort)
+        if (candidate > search_effort)
             break;
         highp int magnitude = ((candidate + 1) / 2) * 4;
         highp int signed_offset = candidate == 0 ? 0 : ((candidate & 1) == 1 ? magnitude : -magnitude);
@@ -375,7 +441,7 @@ highp uvec2 compress_block(highp ivec2 block,
 #ifdef ALP_COMPRESS_ETC1_SPLIT_FUSED
     return encode_etc1_fast_split_fused(pixels);
 #else
-    return encode_etc1(pixels);
+    return encode_etc1(pixels, effort);
 #endif
 #else
     return encode_dxt1(pixels);

@@ -119,7 +119,7 @@ struct GpuPreview {
     unsigned effort;
 };
 
-constexpr std::array<GpuPreview, 7> gpu_previews { {
+constexpr std::array<GpuPreview, 9> gpu_previews { {
     { "Search 0",
         "Tests the average block colour with every ETC1 modifier table and keeps the lowest-error result.",
         gl_engine::TextureCompressor::Encoder::Search,
@@ -147,6 +147,14 @@ constexpr std::array<GpuPreview, 7> gpu_previews { {
     { "split fused exact",
         "Evaluates all four colours in the selected modifier table for every pixel.",
         gl_engine::TextureCompressor::Encoder::FastSplitFusedExact,
+        0 },
+    { "split exact residual fit",
+        "Refits each base from the average per-channel reconstruction residual and evaluates it once.",
+        gl_engine::TextureCompressor::Encoder::FastSplitFusedExactResidual,
+        0 },
+    { "split exact shared residual",
+        "Applies one combined per-channel residual correction to both bases of the winning split.",
+        gl_engine::TextureCompressor::Encoder::FastSplitFusedExactSharedResidual,
         0 },
 } };
 

@@ -402,6 +402,8 @@ struct gl_engine::TextureCompressor::Impl {
     std::unique_ptr<ShaderProgram> dxt1_fragment_program;
     std::unique_ptr<ShaderProgram> etc1_fragment_program;
     std::unique_ptr<ShaderProgram> etc1_fast_split_fused_exact_fragment_program;
+    std::unique_ptr<ShaderProgram> etc1_fast_split_fused_exact_residual_fragment_program;
+    std::unique_ptr<ShaderProgram> etc1_fast_split_fused_exact_shared_residual_fragment_program;
     std::unique_ptr<ShaderProgram> checksum_fragment_program;
     std::unique_ptr<ShaderProgram> packing_program;
 
@@ -489,6 +491,18 @@ struct gl_engine::TextureCompressor::Impl {
             "texture_compress.vert",
             ShaderCodeSource::FILE,
             std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1"), QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED") });
+        etc1_fast_split_fused_exact_residual_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
+            "texture_compress.vert",
+            ShaderCodeSource::FILE,
+            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1"),
+                QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"),
+                QStringLiteral("#define ALP_COMPRESS_ETC1_REFINE_RESIDUAL") });
+        etc1_fast_split_fused_exact_shared_residual_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
+            "texture_compress.vert",
+            ShaderCodeSource::FILE,
+            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1"),
+                QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"),
+                QStringLiteral("#define ALP_COMPRESS_ETC1_REFINE_SHARED_RESIDUAL") });
         checksum_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
             "texture_compress.vert",
             ShaderCodeSource::FILE,
@@ -503,6 +517,8 @@ struct gl_engine::TextureCompressor::Impl {
         dxt1_fragment_program.reset();
         etc1_fragment_program.reset();
         etc1_fast_split_fused_exact_fragment_program.reset();
+        etc1_fast_split_fused_exact_residual_fragment_program.reset();
+        etc1_fast_split_fused_exact_shared_residual_fragment_program.reset();
         checksum_fragment_program.reset();
         packing_program.reset();
         if (!QOpenGLContext::currentContext())
@@ -656,6 +672,10 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
             program = m->etc1_fragment_program.get();
             if (settings.encoder == Encoder::FastSplitFusedExact)
                 program = m->etc1_fast_split_fused_exact_fragment_program.get();
+            else if (settings.encoder == Encoder::FastSplitFusedExactResidual)
+                program = m->etc1_fast_split_fused_exact_residual_fragment_program.get();
+            else if (settings.encoder == Encoder::FastSplitFusedExactSharedResidual)
+                program = m->etc1_fast_split_fused_exact_shared_residual_fragment_program.get();
         }
         f->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_framebuffer);
         f->glGetIntegerv(GL_VIEWPORT, previous_viewport);

@@ -95,6 +95,8 @@ public:
         Search,
         Dxt1,
         FastSplitFusedExact,
+        FastSplitFusedExactResidual,
+        FastSplitFusedExactSharedResidual,
         Checksum
     };
 

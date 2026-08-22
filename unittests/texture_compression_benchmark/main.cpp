@@ -312,6 +312,11 @@ std::vector<Algorithm> supported_algorithms(Format format)
         result.push_back({ "DXT1", Operation::Compression, settings(Encoder::Dxt1) });
     } else if (format == Format::ETC1) {
         result.push_back({ "ETC1 fused exact", Operation::Compression, settings(Encoder::FastSplitFusedExact) });
+        result.push_back(
+            { "ETC1 fused exact residual fit", Operation::Compression, settings(Encoder::FastSplitFusedExactResidual) });
+        result.push_back({ "ETC1 fused exact shared residual",
+            Operation::Compression,
+            settings(Encoder::FastSplitFusedExactSharedResidual) });
     }
     return result;
 }
