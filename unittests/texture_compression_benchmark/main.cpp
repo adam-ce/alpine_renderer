@@ -312,7 +312,25 @@ std::vector<Algorithm> supported_algorithms(Format format)
         result.push_back({ "DXT1", Operation::Compression, settings(Encoder::Dxt1) });
     } else if (format == Format::ETC1) {
         result.push_back({ "ETC1 fast split fused", Operation::Compression, settings(Encoder::FastSplitFused) });
+        result.push_back(
+            { "ETC1 fused projection", Operation::Compression, settings(Encoder::FastSplitFusedProjection) });
+        result.push_back({ "ETC1 fused projection clamp",
+            Operation::Compression,
+            settings(Encoder::FastSplitFusedProjectionClamped) });
+        result.push_back({ "ETC1 fused exact", Operation::Compression, settings(Encoder::FastSplitFusedExact) });
+        result.push_back({ "ETC1 fused exact table search",
+            Operation::Compression,
+            settings(Encoder::FastSplitFusedExactTableSearch) });
         result.push_back({ "ETC1 fast split bounds", Operation::Compression, settings(Encoder::FastSplitBounds) });
+        result.push_back(
+            { "ETC1 bounds projection", Operation::Compression, settings(Encoder::FastSplitBoundsProjection) });
+        result.push_back({ "ETC1 bounds projection clamp",
+            Operation::Compression,
+            settings(Encoder::FastSplitBoundsProjectionClamped) });
+        result.push_back({ "ETC1 bounds exact", Operation::Compression, settings(Encoder::FastSplitBoundsExact) });
+        result.push_back({ "ETC1 bounds exact table search",
+            Operation::Compression,
+            settings(Encoder::FastSplitBoundsExactTableSearch) });
     }
     return result;
 }

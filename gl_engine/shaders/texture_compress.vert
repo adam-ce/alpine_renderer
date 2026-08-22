@@ -132,6 +132,64 @@ highp int table_for_range(highp int range)
     return 7;
 }
 
+highp uint select_etc1_modifier_exact(highp uvec3 pixel, highp ivec3 decoded_base, highp int table)
+{
+    highp uint selected = 0u;
+    highp uint selected_error = 0xffffffffu;
+    for (int index = 0; index < 4; ++index) {
+        highp ivec3 reconstructed = clamp(decoded_base + ivec3(modifier(table, index)), ivec3(0), ivec3(255));
+        highp ivec3 delta = ivec3(pixel) - reconstructed;
+        highp uint error = uint(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+        if (error < selected_error) {
+            selected = uint(index);
+            selected_error = error;
+        }
+    }
+    return selected;
+}
+
+highp uint select_etc1_modifier_projection(highp uvec3 pixel, highp ivec3 decoded_base, highp int table)
+{
+    highp ivec3 delta = ivec3(pixel) - decoded_base;
+    highp int delta_sum = delta.r + delta.g + delta.b;
+    highp int midpoint_limit = 3 * (modifier(table, 0) + modifier(table, 1));
+    highp int twice_delta_sum = 2 * delta_sum;
+    if (twice_delta_sum < -midpoint_limit)
+        return 3u;
+    if (delta_sum < 0)
+        return 2u;
+    if (twice_delta_sum <= midpoint_limit)
+        return 0u;
+    return 1u;
+}
+
+highp uint select_etc1_modifier(highp uvec3 pixel,
+    highp int pixel_brightness,
+    highp ivec3 decoded_base,
+    highp int table,
+    highp int middle,
+    highp int threshold)
+{
+#if defined(ALP_ETC1_INDEX_EXACT) || defined(ALP_ETC1_INDEX_EXACT_TABLE_SEARCH)
+    return select_etc1_modifier_exact(pixel, decoded_base, table);
+#elif defined(ALP_ETC1_INDEX_PROJECTION_CLAMPED)
+    highp int far_modifier = modifier(table, 1);
+    bool palette_clips = any(lessThan(decoded_base, ivec3(far_modifier)))
+        || any(greaterThan(decoded_base, ivec3(255 - far_modifier)));
+    if (palette_clips)
+        return select_etc1_modifier_exact(pixel, decoded_base, table);
+    return select_etc1_modifier_projection(pixel, decoded_base, table);
+#elif defined(ALP_ETC1_INDEX_PROJECTION)
+    return select_etc1_modifier_projection(pixel, decoded_base, table);
+#else
+    highp int brightness_delta = pixel_brightness - middle;
+    highp uint selected = uint(abs(brightness_delta) >= threshold);
+    if (brightness_delta < 0)
+        selected += 2u;
+    return selected;
+#endif
+}
+
 struct FastEtc1Subblock {
     highp ivec3 colour;
     highp int table;
@@ -188,6 +246,35 @@ FastEtc1Bases fast_split_bases(FastEtc1Subblock first, FastEtc1Subblock second)
         0u);
 }
 
+#ifdef ALP_ETC1_INDEX_EXACT_TABLE_SEARCH
+highp int search_etc1_table(highp uvec3 pixels[16], highp ivec3 decoded_base, bool flip, bool second)
+{
+    highp uint best_error = 0xffffffffu;
+    highp int best_table = 0;
+    for (int table = 0; table < 8; ++table) {
+        highp uint total_error = 0u;
+        for (int y = 0; y < 4; ++y) {
+            for (int x = 0; x < 4; ++x) {
+                bool use_second = flip ? y >= 2 : x >= 2;
+                if (use_second != second)
+                    continue;
+                highp uvec3 pixel = pixels[y * 4 + x];
+                highp uint selected = select_etc1_modifier_exact(pixel, decoded_base, table);
+                highp ivec3 reconstructed
+                    = clamp(decoded_base + ivec3(modifier(table, int(selected))), ivec3(0), ivec3(255));
+                highp ivec3 delta = ivec3(pixel) - reconstructed;
+                total_error += uint(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+            }
+        }
+        if (total_error < best_error) {
+            best_error = total_error;
+            best_table = table;
+        }
+    }
+    return best_table;
+}
+#endif
+
 highp uvec2 encode_etc1_fast_split_fused(highp uvec3 pixels[16])
 {
     highp uvec3 left_minimum = uvec3(255u);
@@ -232,6 +319,12 @@ highp uvec2 encode_etc1_fast_split_fused(highp uvec3 pixels[16])
     FastEtc1Subblock bottom = fast_subblock_from_statistics(bottom_minimum, bottom_maximum, bottom_sum);
     FastEtc1Bases vertical_bases = fast_split_bases(left, right);
     FastEtc1Bases horizontal_bases = fast_split_bases(top, bottom);
+#ifdef ALP_ETC1_INDEX_EXACT_TABLE_SEARCH
+    left.table = search_etc1_table(pixels, vertical_bases.first_decoded, false, false);
+    right.table = search_etc1_table(pixels, vertical_bases.second_decoded, false, true);
+    top.table = search_etc1_table(pixels, horizontal_bases.first_decoded, true, false);
+    bottom.table = search_etc1_table(pixels, horizontal_bases.second_decoded, true, true);
+#endif
 
     highp uint vertical_indices = 0u;
     highp uint horizontal_indices = 0u;
@@ -249,10 +342,8 @@ highp uvec2 encode_etc1_fast_split_fused(highp uvec3 pixels[16])
             highp int vertical_threshold = use_right ? right.threshold : left.threshold;
             highp int vertical_table = use_right ? right.table : left.table;
             highp ivec3 vertical_base = use_right ? vertical_bases.second_decoded : vertical_bases.first_decoded;
-            highp int vertical_brightness_delta = pixel_brightness - vertical_middle;
-            highp uint vertical_selected = uint(abs(vertical_brightness_delta) >= vertical_threshold);
-            if (vertical_brightness_delta < 0)
-                vertical_selected += 2u;
+            highp uint vertical_selected = select_etc1_modifier(
+                pixel, pixel_brightness, vertical_base, vertical_table, vertical_middle, vertical_threshold);
             highp ivec3 vertical_reconstructed
                 = clamp(vertical_base + ivec3(modifier(vertical_table, int(vertical_selected))), ivec3(0), ivec3(255));
             highp ivec3 vertical_delta = ivec3(pixel) - vertical_reconstructed;
@@ -262,10 +353,8 @@ highp uvec2 encode_etc1_fast_split_fused(highp uvec3 pixels[16])
             highp int horizontal_threshold = use_bottom ? bottom.threshold : top.threshold;
             highp int horizontal_table = use_bottom ? bottom.table : top.table;
             highp ivec3 horizontal_base = use_bottom ? horizontal_bases.second_decoded : horizontal_bases.first_decoded;
-            highp int horizontal_brightness_delta = pixel_brightness - horizontal_middle;
-            highp uint horizontal_selected = uint(abs(horizontal_brightness_delta) >= horizontal_threshold);
-            if (horizontal_brightness_delta < 0)
-                horizontal_selected += 2u;
+            highp uint horizontal_selected = select_etc1_modifier(
+                pixel, pixel_brightness, horizontal_base, horizontal_table, horizontal_middle, horizontal_threshold);
             highp ivec3 horizontal_reconstructed
                 = clamp(horizontal_base + ivec3(modifier(horizontal_table, int(horizontal_selected))), ivec3(0), ivec3(255));
             highp ivec3 horizontal_delta = ivec3(pixel) - horizontal_reconstructed;
@@ -294,17 +383,22 @@ highp uvec2 encode_etc1_selected_orientation(highp uvec3 pixels[16],
     bool flip)
 {
     FastEtc1Bases bases = fast_split_bases(first, second);
+#ifdef ALP_ETC1_INDEX_EXACT_TABLE_SEARCH
+    first.table = search_etc1_table(pixels, bases.first_decoded, flip, false);
+    second.table = search_etc1_table(pixels, bases.second_decoded, flip, true);
+#endif
     highp uint indices = 0u;
     for (int y = 0; y < 4; ++y) {
         for (int x = 0; x < 4; ++x) {
             highp int pixel_index = y * 4 + x;
             bool use_second = flip ? y >= 2 : x >= 2;
+            highp uvec3 pixel = pixels[pixel_index];
             highp int middle = use_second ? second.middle : first.middle;
             highp int threshold = use_second ? second.threshold : first.threshold;
-            highp int brightness_delta = brightness(pixels[pixel_index]) - middle;
-            highp uint selected = uint(abs(brightness_delta) >= threshold);
-            if (brightness_delta < 0)
-                selected += 2u;
+            highp int table = use_second ? second.table : first.table;
+            highp ivec3 decoded_base = use_second ? bases.second_decoded : bases.first_decoded;
+            highp uint selected
+                = select_etc1_modifier(pixel, brightness(pixel), decoded_base, table, middle, threshold);
             highp uint bit_position = uint(x * 4 + y);
             indices |= (selected & 1u) << bit_position;
             indices |= (selected >> 1u) << (bit_position + 16u);
