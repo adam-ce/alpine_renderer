@@ -16,7 +16,6 @@
 #include <QOpenGLContext>
 #include <QOpenGLExtraFunctions>
 #include <QOpenGLWindow>
-#include <QPainter>
 #include <QSurfaceFormat>
 #include <QTimer>
 #include <QUrl>
@@ -34,13 +33,13 @@
 #include <sstream>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gl_engine/Framebuffer.h>
 #include <gl_engine/ShaderProgram.h>
 #include <gl_engine/Texture.h>
 #include <gl_engine/helpers.h>
-#include <nucleus/tile/conversion.h>
 #include <nucleus/utils/image_loader.h>
 
 namespace {
@@ -362,11 +361,11 @@ private:
                     auto* reply = m_network_manager.get(QNetworkRequest(QUrl(url)));
                     connect(reply, &QNetworkReply::finished, this, [this, reply, tile_index, url]() {
                         if (reply->error() == QNetworkReply::NoError) {
-                            const auto image = nucleus::utils::image_loader::rgba8(reply->readAll());
+                            auto image = nucleus::utils::image_loader::rgba8(reply->readAll());
                             if (image && image->size() == glm::uvec2(256u))
-                                m_downloaded_tiles[tile_index] = nucleus::tile::conversion::to_QImage(*image);
+                                m_downloaded_tiles[tile_index] = std::move(*image);
                         }
-                        if (m_downloaded_tiles[tile_index].isNull() && m_download_error.isEmpty())
+                        if (m_downloaded_tiles[tile_index].size() != glm::uvec2(256u) && m_download_error.isEmpty())
                             m_download_error = QStringLiteral("Unable to download benchmark tile: %1").arg(url);
                         reply->deleteLater();
                         if (--m_downloads_remaining == 0)
@@ -387,16 +386,22 @@ private:
         m_sources.clear();
         m_sources.reserve(texture_compression_data::tile_groups.size());
         for (size_t group_index = 0; group_index < texture_compression_data::tile_groups.size(); ++group_index) {
-            QImage stitched(int(resolution), int(resolution), QImage::Format_RGBA8888);
-            QPainter painter(&stitched);
-            for (int y = 0; y < 2; ++y) {
-                for (int x = 0; x < 2; ++x) {
-                    painter.drawImage(QPoint(x * 256, y * 256),
-                        m_downloaded_tiles[group_index * 4 + size_t(y * 2 + x)]);
-                }
+            const auto tile_offset = group_index * 4;
+            auto top = radix::raster::concatenate_horizontally(
+                m_downloaded_tiles[tile_offset], m_downloaded_tiles[tile_offset + 1]);
+            auto bottom = radix::raster::concatenate_horizontally(
+                m_downloaded_tiles[tile_offset + 2], m_downloaded_tiles[tile_offset + 3]);
+            if (!top || !bottom) {
+                fail(QStringLiteral("Unable to stitch benchmark tile row."));
+                return;
             }
-            painter.end();
-            m_sources.push_back(nucleus::tile::conversion::to_rgba8raster(stitched));
+
+            auto stitched = radix::raster::concatenate_vertically(*top, *bottom);
+            if (!stitched) {
+                fail(QStringLiteral("Unable to stitch benchmark tile group."));
+                return;
+            }
+            m_sources.push_back(std::move(*stitched));
         }
         m_downloaded_tiles.clear();
         m_data_ready = true;
@@ -677,7 +682,7 @@ private:
     }
 
     QNetworkAccessManager m_network_manager;
-    std::vector<QImage> m_downloaded_tiles;
+    std::vector<Raster> m_downloaded_tiles;
     std::vector<Raster> m_sources;
     QString m_download_error;
     int m_downloads_remaining = 0;
