@@ -47,9 +47,11 @@ using Clock = std::chrono::steady_clock;
 using Raster = radix::Raster<glm::u8vec4>;
 using Format = nucleus::utils::ColourTexture::Format;
 using Encoder = gl_engine::TextureCompressor::Encoder;
+using TransferMode = gl_engine::TextureCompressor::TransferMode;
 
 constexpr unsigned resolution = 512;
-constexpr unsigned batch_size = 4;
+constexpr unsigned max_batch_size = 4;
+constexpr std::array<unsigned, 3> batch_sizes { 1, 2, 4 };
 constexpr unsigned framebuffer_size = 32;
 constexpr int warmup_batches = 2;
 constexpr int measured_batches = 10;
@@ -61,7 +63,7 @@ constexpr int ssim_window_radius = ssim_window_size / 2;
 enum class Operation { SamplingOnly, Compression };
 
 struct Workload {
-    std::array<size_t, batch_size> source_indices {};
+    std::array<size_t, max_batch_size> source_indices {};
     uint32_t sampling_seed = 0;
 };
 
@@ -295,27 +297,44 @@ const char* format_name(Format format)
 
 std::vector<Algorithm> supported_algorithms(Format format)
 {
-    const auto settings = [format](Encoder encoder) {
+    const auto settings = [format](Encoder encoder, TransferMode transfer_mode) {
         return gl_engine::TextureCompressor::Settings {
             .algorithm = format,
             .effort = 0,
             .encoder = encoder,
             .generate_mipmaps = true,
+            .transfer_mode = transfer_mode,
         };
     };
 
     std::vector<Algorithm> result;
-    result.push_back({ "sampling only", Operation::SamplingOnly, settings(Encoder::Checksum) });
-    result.push_back({ "checksum", Operation::Compression, settings(Encoder::Checksum), true });
-    if (format == Format::DXT1) {
-        result.push_back({ "DXT1", Operation::Compression, settings(Encoder::Dxt1) });
-    } else if (format == Format::ETC1) {
-        result.push_back({ "ETC1 fused exact", Operation::Compression, settings(Encoder::FastSplitFusedExact) });
-        result.push_back(
-            { "ETC1 fused exact residual fit", Operation::Compression, settings(Encoder::FastSplitFusedExactResidual) });
-        result.push_back({ "ETC1 fused exact shared residual",
+    result.push_back(
+        { "sampling only", Operation::SamplingOnly, settings(Encoder::Checksum, TransferMode::PackedRGBA8) });
+    const std::array<std::pair<TransferMode, const char*>, 3> transfer_modes { {
+        { TransferMode::PackedRGBA8, "packed RGBA8" },
+        { TransferMode::DirectRG32UI, "direct RG32UI" },
+        { TransferMode::PairedRGBA32UI, "paired RGBA32UI" },
+    } };
+    for (const auto& [transfer_mode, transfer_name] : transfer_modes) {
+        result.push_back({ std::string("checksum / ") + transfer_name,
             Operation::Compression,
-            settings(Encoder::FastSplitFusedExactSharedResidual) });
+            settings(Encoder::Checksum, transfer_mode),
+            true });
+        if (format == Format::DXT1) {
+            result.push_back({ std::string("DXT1 / ") + transfer_name,
+                Operation::Compression,
+                settings(Encoder::Dxt1, transfer_mode) });
+        } else if (format == Format::ETC1) {
+            result.push_back({ std::string("ETC1 fused exact / ") + transfer_name,
+                Operation::Compression,
+                settings(Encoder::FastSplitFusedExact, transfer_mode) });
+            result.push_back({ std::string("ETC1 fused exact residual fit / ") + transfer_name,
+                Operation::Compression,
+                settings(Encoder::FastSplitFusedExactResidual, transfer_mode) });
+            result.push_back({ std::string("ETC1 fused exact shared residual / ") + transfer_name,
+                Operation::Compression,
+                settings(Encoder::FastSplitFusedExactSharedResidual, transfer_mode) });
+        }
     }
     return result;
 }
@@ -340,14 +359,52 @@ protected:
 
     void paintGL() override
     {
-        if (!m_data_ready || m_benchmark_started)
+        if (!m_data_ready)
             return;
-        m_benchmark_started = true;
-        const auto successful = run_benchmark();
-        QTimer::singleShot(0, qApp, [successful]() { QCoreApplication::exit(successful ? EXIT_SUCCESS : EXIT_FAILURE); });
+        const auto successful = m_benchmark_state ? advance_benchmark() : begin_benchmark();
+        if (!successful) {
+            QTimer::singleShot(0, qApp, []() { QCoreApplication::exit(EXIT_FAILURE); });
+            return;
+        }
+        if (m_batch_index == batch_sizes.size() && !m_benchmark_state) {
+#if defined(__EMSCRIPTEN__)
+            qInfo().noquote() << QStringLiteral("Benchmark complete.");
+            m_data_ready = false;
+#else
+            QTimer::singleShot(0, qApp, []() { QCoreApplication::exit(EXIT_SUCCESS); });
+#endif
+            return;
+        }
+        QTimer::singleShot(10, this, [this]() { update(); });
     }
 
 private:
+    struct BenchmarkState {
+        enum class Phase { Timing, QualitySetup, Quality, Report };
+
+        unsigned batch_size = 0;
+        Format format = Format::Uncompressed_RGBA;
+        std::vector<Algorithm> algorithms;
+        std::unique_ptr<gl_engine::Texture> destination;
+        std::unique_ptr<gl_engine::TextureCompressor> compressor;
+        std::unique_ptr<gl_engine::Framebuffer> framebuffer;
+        std::unique_ptr<gl_engine::ShaderProgram> sampling_shader;
+        gl_engine::helpers::ScreenQuadGeometry sampling_geometry;
+        std::array<unsigned, max_batch_size> destination_layers { 0, 1, 2, 3 };
+        std::mt19937 random_engine { random_seed };
+        std::array<std::array<Workload, warmup_batches + measured_batches>, repetitions> workloads;
+        std::vector<size_t> algorithm_order;
+        size_t startup_step = 0;
+        bool destination_initialised = false;
+        int repetition = 0;
+        size_t algorithm_position = 0;
+        Phase phase = Phase::Timing;
+        std::vector<QualityReference> quality_references;
+        std::unique_ptr<gl_engine::Framebuffer> quality_framebuffer;
+        std::unique_ptr<gl_engine::ShaderProgram> quality_shader;
+        size_t quality_algorithm = 0;
+    };
+
     void download_data()
     {
         m_downloads_remaining = int(m_downloaded_tiles.size());
@@ -409,23 +466,25 @@ private:
         update();
     }
 
-    bool run_benchmark()
+    bool begin_benchmark()
     {
-        const auto format = gl_engine::Texture::compression_algorithm();
-        auto algorithms = supported_algorithms(format);
-        if (algorithms.size() <= 2) {
+        Q_ASSERT(m_batch_index < batch_sizes.size());
+        auto state = std::make_unique<BenchmarkState>();
+        state->batch_size = batch_sizes[m_batch_index];
+        state->format = gl_engine::Texture::compression_algorithm();
+        state->algorithms = supported_algorithms(state->format);
+        if (state->algorithms.size() <= 2) {
             qInfo().noquote() << QStringLiteral("No supported GPU compression algorithm was found.");
             return false;
         }
+        qInfo().noquote() << QStringLiteral("Initialising batch size %1...").arg(state->batch_size);
+        m_benchmark_state = std::move(state);
+        return true;
+    }
 
-        gl_engine::Texture destination(gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
-        destination.setParams(gl_engine::Texture::Filter::MipMapLinear, gl_engine::Texture::Filter::Linear);
-        destination.allocate_array(resolution, resolution, batch_size);
-        gl_engine::TextureCompressor compressor(resolution, resolution, batch_size);
-        gl_engine::Framebuffer framebuffer(gl_engine::Framebuffer::DepthFormat::None,
-            { gl_engine::Framebuffer::ColourFormat::RGBA8 },
-            { framebuffer_size, framebuffer_size });
-        gl_engine::ShaderProgram sampling_shader(R"(
+    std::unique_ptr<gl_engine::ShaderProgram> make_sampling_shader()
+    {
+        return std::make_unique<gl_engine::ShaderProgram>(R"(
             void main() {
                 highp vec2 vertices[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
                 gl_Position = vec4(vertices[gl_VertexID], 0.0, 1.0);
@@ -433,6 +492,7 @@ private:
             R"(
             uniform lowp sampler2DArray texture_sampler;
             uniform highp uint sampling_seed;
+            uniform highp uint active_layers;
             layout(location = 0) out lowp vec4 out_color;
 
             highp uint hash(highp uint value) {
@@ -451,7 +511,7 @@ private:
                 random_value = hash(random_value);
                 highp float y = float(random_value & 0xffffu) / 65535.0;
                 random_value = hash(random_value);
-                highp float layer = float(random_value % 4u);
+                highp float layer = float(random_value % active_layers);
                 random_value = hash(random_value);
                 highp float level = float(random_value % 10u);
                 lowp vec4 sampled = textureLod(texture_sampler, vec3(x, y, layer), level);
@@ -461,105 +521,125 @@ private:
                 out_color = sampled;
             })",
             gl_engine::ShaderCodeSource::PLAINTEXT);
-        auto sampling_geometry = gl_engine::helpers::create_screen_quad_geometry();
-        const std::array<unsigned, batch_size> destination_layers { 0, 1, 2, 3 };
+    }
 
-        std::mt19937 random_engine(random_seed);
-        std::array<std::array<Workload, warmup_batches + measured_batches>, repetitions> workloads;
-        for (auto& repetition : workloads) {
-            for (auto& workload : repetition) {
-                std::array<size_t, texture_compression_data::tile_groups.size()> indices;
-                std::iota(indices.begin(), indices.end(), 0);
-                std::ranges::shuffle(indices, random_engine);
-                std::ranges::copy_n(indices.begin(), batch_size, workload.source_indices.begin());
-                workload.sampling_seed = random_engine();
-            }
-        }
-
-        const auto run_batch = [&](const Algorithm& algorithm, const Workload& workload) {
-            std::vector<Raster> selected_sources;
-            if (algorithm.operation == Operation::Compression) {
-                selected_sources.reserve(batch_size);
-                for (const auto source_index : workload.source_indices)
-                    selected_sources.push_back(m_sources[source_index]);
-            }
-
-            const auto start = Clock::now();
-            if (algorithm.operation == Operation::Compression) {
-                static_cast<void>(compressor.compress(
-                    selected_sources, destination, destination_layers, algorithm.settings));
-            }
-
-            auto* functions = QOpenGLContext::currentContext()->extraFunctions();
-            framebuffer.bind();
-            functions->glViewport(0, 0, framebuffer_size, framebuffer_size);
-            functions->glDisable(GL_BLEND);
-            functions->glDisable(GL_CULL_FACE);
-            functions->glDisable(GL_DEPTH_TEST);
-            functions->glDisable(GL_SCISSOR_TEST);
-            functions->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-            sampling_shader.bind();
-            destination.bind(0);
-            sampling_shader.set_uniform("texture_sampler", 0);
-            sampling_shader.set_uniform("sampling_seed", workload.sampling_seed);
-            sampling_geometry.draw();
-            sampling_shader.release();
-            const auto pixel = framebuffer.read_colour_attachment_pixel<glm::u8vec4>(0, { -1.0, -1.0 });
-            const auto end = Clock::now();
-            m_pixel_checksum += uint64_t(pixel.x) + 3u * uint64_t(pixel.y) + 5u * uint64_t(pixel.z) + 7u * uint64_t(pixel.w);
-            return std::chrono::duration<double, std::milli>(end - start).count();
-        };
-
-        // Give the sampling-only baseline valid compressed data even if it is first in the random order.
-        std::vector<Raster> initial_sources(m_sources.begin(), m_sources.begin() + batch_size);
-        static_cast<void>(compressor.compress(
-            initial_sources, destination, destination_layers, algorithms[1].settings));
-
-        qInfo().noquote() << QStringLiteral("\nTexture compression benchmark\n"
-                                           "GL vendor: %1\n"
-                                           "GL renderer: %2\n"
-                                           "GL version: %3\n"
-                                           "Compression format: %4\n"
-                                           "Random seed: 0x%5\n"
-                                           "Batch: 4 x 512x512 base-level textures, with mipmaps\n"
-                                           "Schedule: %6 repetitions, %7 warm-up + %8 measured batches per algorithm\n"
-                                           "Timer: steady-clock wall time through dependent one-pixel framebuffer readback\n")
-                                 .arg(QString::fromStdString(gl_string(GL_VENDOR)))
-                                 .arg(QString::fromStdString(gl_string(GL_RENDERER)))
-                                 .arg(QString::fromStdString(gl_string(GL_VERSION)))
-                                 .arg(QString::fromLatin1(format_name(format)))
-                                 .arg(QString::number(random_seed, 16))
-                                 .arg(repetitions)
-                                 .arg(warmup_batches)
-                                 .arg(measured_batches);
-
-        std::vector<size_t> algorithm_order(algorithms.size());
-        std::iota(algorithm_order.begin(), algorithm_order.end(), 0);
-        for (int repetition = 0; repetition < repetitions; ++repetition) {
-            std::ranges::shuffle(algorithm_order, random_engine);
-            for (const auto algorithm_index : algorithm_order) {
-                auto& algorithm = algorithms[algorithm_index];
-                for (int batch = 0; batch < warmup_batches; ++batch)
-                    static_cast<void>(run_batch(algorithm, workloads[size_t(repetition)][size_t(batch)]));
-                for (int batch = 0; batch < measured_batches; ++batch) {
-                    algorithm.samples.push_back(run_batch(
-                        algorithm, workloads[size_t(repetition)][size_t(warmup_batches + batch)]));
+    bool advance_startup(BenchmarkState& state)
+    {
+        switch (state.startup_step++) {
+        case 0:
+            state.destination = std::make_unique<gl_engine::Texture>(
+                gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
+            state.destination->setParams(gl_engine::Texture::Filter::MipMapLinear, gl_engine::Texture::Filter::Linear);
+            state.destination->allocate_array(resolution, resolution, state.batch_size);
+            return true;
+        case 1:
+            state.compressor
+                = std::make_unique<gl_engine::TextureCompressor>(resolution, resolution, state.batch_size);
+            return true;
+        case 2:
+            state.framebuffer = std::make_unique<gl_engine::Framebuffer>(
+                gl_engine::Framebuffer::DepthFormat::None,
+                std::vector { gl_engine::Framebuffer::ColourFormat::RGBA8 },
+                glm::uvec2 { framebuffer_size, framebuffer_size });
+            return true;
+        case 3:
+            state.sampling_shader = make_sampling_shader();
+            return true;
+        case 4:
+            state.sampling_geometry = gl_engine::helpers::create_screen_quad_geometry();
+            return true;
+        case 5:
+            for (auto& repetition : state.workloads) {
+                for (auto& workload : repetition) {
+                    std::array<size_t, texture_compression_data::tile_groups.size()> indices;
+                    std::iota(indices.begin(), indices.end(), 0);
+                    std::ranges::shuffle(indices, state.random_engine);
+                    std::ranges::copy_n(indices.begin(), max_batch_size, workload.source_indices.begin());
+                    workload.sampling_seed = state.random_engine();
                 }
             }
-            qInfo().noquote()
-                << QStringLiteral("Completed repetition %1/%2").arg(repetition + 1).arg(repetitions);
+            state.algorithm_order.resize(state.algorithms.size());
+            std::iota(state.algorithm_order.begin(), state.algorithm_order.end(), 0);
+            qInfo().noquote() << QStringLiteral("\nTexture compression benchmark\n"
+                                               "GL vendor: %1\n"
+                                               "GL renderer: %2\n"
+                                               "GL version: %3\n"
+                                               "Compression format: %4\n"
+                                               "Random seed: 0x%5\n"
+                                               "Batch: %6 x 512x512 base-level textures, with mipmaps\n"
+                                               "Schedule: %7 repetitions, %8 warm-up + %9 measured batches per algorithm\n"
+                                               "Timer: steady-clock wall time through dependent one-pixel framebuffer readback\n")
+                                     .arg(QString::fromStdString(gl_string(GL_VENDOR)))
+                                     .arg(QString::fromStdString(gl_string(GL_RENDERER)))
+                                     .arg(QString::fromStdString(gl_string(GL_VERSION)))
+                                     .arg(QString::fromLatin1(format_name(state.format)))
+                                     .arg(QString::number(random_seed, 16))
+                                     .arg(state.batch_size)
+                                     .arg(repetitions)
+                                     .arg(warmup_batches)
+                                     .arg(measured_batches);
+            return true;
+        default:
+            std::vector<Raster> initial_sources(m_sources.begin(), m_sources.begin() + state.batch_size);
+            static_cast<void>(state.compressor->compress(initial_sources,
+                *state.destination,
+                std::span(state.destination_layers).first(state.batch_size),
+                state.algorithms[1].settings));
+            state.destination_initialised = true;
+            return true;
+        }
+    }
+
+    double run_timed_batch(BenchmarkState& state, const Algorithm& algorithm, const Workload& workload)
+    {
+        std::vector<Raster> selected_sources;
+        if (algorithm.operation == Operation::Compression) {
+            selected_sources.reserve(state.batch_size);
+            for (unsigned layer = 0; layer < state.batch_size; ++layer)
+                selected_sources.push_back(m_sources[workload.source_indices[layer]]);
         }
 
-        qInfo().noquote() << QStringLiteral("Computing untimed 512x512 quality metrics...");
-        std::vector<QualityReference> quality_references;
-        quality_references.reserve(m_sources.size());
-        for (const auto& source : m_sources)
-            quality_references.push_back(make_quality_reference(source));
+        const auto start = Clock::now();
+        if (algorithm.operation == Operation::Compression) {
+            static_cast<void>(state.compressor->compress(selected_sources,
+                *state.destination,
+                std::span(state.destination_layers).first(state.batch_size),
+                algorithm.settings));
+        }
 
-        gl_engine::Framebuffer quality_framebuffer(gl_engine::Framebuffer::DepthFormat::None,
-            { gl_engine::Framebuffer::ColourFormat::RGBA8 },
-            { resolution, resolution });
-        gl_engine::ShaderProgram quality_shader(R"(
+        auto* functions = QOpenGLContext::currentContext()->extraFunctions();
+        state.framebuffer->bind();
+        functions->glViewport(0, 0, framebuffer_size, framebuffer_size);
+        functions->glDisable(GL_BLEND);
+        functions->glDisable(GL_CULL_FACE);
+        functions->glDisable(GL_DEPTH_TEST);
+        functions->glDisable(GL_SCISSOR_TEST);
+        functions->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        state.sampling_shader->bind();
+        state.destination->bind(0);
+        state.sampling_shader->set_uniform("texture_sampler", 0);
+        state.sampling_shader->set_uniform("sampling_seed", workload.sampling_seed);
+        state.sampling_shader->set_uniform("active_layers", state.batch_size);
+        state.sampling_geometry.draw();
+        state.sampling_shader->release();
+        const auto pixel = state.framebuffer->read_colour_attachment_pixel<glm::u8vec4>(0, { -1.0, -1.0 });
+        const auto end = Clock::now();
+        m_pixel_checksum
+            += uint64_t(pixel.x) + 3u * uint64_t(pixel.y) + 5u * uint64_t(pixel.z) + 7u * uint64_t(pixel.w);
+        return std::chrono::duration<double, std::milli>(end - start).count();
+    }
+
+    void prepare_quality(BenchmarkState& state)
+    {
+        qInfo().noquote() << QStringLiteral("Computing untimed 512x512 quality metrics...");
+        state.quality_references.reserve(m_sources.size());
+        for (const auto& source : m_sources)
+            state.quality_references.push_back(make_quality_reference(source));
+        state.quality_framebuffer = std::make_unique<gl_engine::Framebuffer>(
+            gl_engine::Framebuffer::DepthFormat::None,
+            std::vector { gl_engine::Framebuffer::ColourFormat::RGBA8 },
+            glm::uvec2 { resolution, resolution });
+        state.quality_shader = std::make_unique<gl_engine::ShaderProgram>(R"(
             out highp vec2 texcoords;
             void main() {
                 highp vec2 vertices[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
@@ -575,54 +655,59 @@ private:
                 out_color = textureLod(texture_sampler, vec3(texcoords.x, 1.0 - texcoords.y, texture_layer), 0.0);
             })",
             gl_engine::ShaderCodeSource::PLAINTEXT);
+    }
 
-        const auto reconstruct = [&](unsigned layer) {
-            auto* functions = QOpenGLContext::currentContext()->extraFunctions();
-            quality_framebuffer.bind();
-            functions->glViewport(0, 0, resolution, resolution);
-            functions->glDisable(GL_BLEND);
-            functions->glDisable(GL_CULL_FACE);
-            functions->glDisable(GL_DEPTH_TEST);
-            functions->glDisable(GL_SCISSOR_TEST);
-            functions->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-            quality_shader.bind();
-            destination.bind(0);
-            quality_shader.set_uniform("texture_sampler", 0);
-            quality_shader.set_uniform("texture_layer", float(layer));
-            sampling_geometry.draw();
-            quality_shader.release();
-            return quality_framebuffer.read_colour_attachment(0);
-        };
+    QImage reconstruct(BenchmarkState& state, unsigned layer)
+    {
+        auto* functions = QOpenGLContext::currentContext()->extraFunctions();
+        state.quality_framebuffer->bind();
+        functions->glViewport(0, 0, resolution, resolution);
+        functions->glDisable(GL_BLEND);
+        functions->glDisable(GL_CULL_FACE);
+        functions->glDisable(GL_DEPTH_TEST);
+        functions->glDisable(GL_SCISSOR_TEST);
+        functions->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        state.quality_shader->bind();
+        state.destination->bind(0);
+        state.quality_shader->set_uniform("texture_sampler", 0);
+        state.quality_shader->set_uniform("texture_layer", float(layer));
+        state.sampling_geometry.draw();
+        state.quality_shader->release();
+        return state.quality_framebuffer->read_colour_attachment(0);
+    }
 
-        for (auto& algorithm : algorithms) {
-            if (algorithm.operation != Operation::Compression || algorithm.checksum)
-                continue;
-            QualityAccumulator accumulator;
-            for (size_t source_offset = 0; source_offset < m_sources.size(); source_offset += batch_size) {
-                Q_ASSERT(source_offset + batch_size <= m_sources.size());
-                std::vector<Raster> selected_sources;
-                selected_sources.reserve(batch_size);
-                for (size_t layer = 0; layer < batch_size; ++layer)
-                    selected_sources.push_back(m_sources[source_offset + layer]);
-                static_cast<void>(compressor.compress(
-                    selected_sources, destination, destination_layers, algorithm.settings));
-                for (unsigned layer = 0; layer < batch_size; ++layer) {
-                    accumulate_quality(accumulator,
-                        reconstruct(layer),
-                        selected_sources[layer],
-                        quality_references[source_offset + layer]);
-                }
+    void compute_quality(BenchmarkState& state, Algorithm& algorithm)
+    {
+        QualityAccumulator accumulator;
+        for (size_t source_offset = 0; source_offset < m_sources.size(); source_offset += state.batch_size) {
+            const auto active_batch_size
+                = std::min(state.batch_size, unsigned(m_sources.size() - source_offset));
+            std::vector<Raster> selected_sources;
+            selected_sources.reserve(active_batch_size);
+            for (size_t layer = 0; layer < active_batch_size; ++layer)
+                selected_sources.push_back(m_sources[source_offset + layer]);
+            static_cast<void>(state.compressor->compress(selected_sources,
+                *state.destination,
+                std::span(state.destination_layers).first(active_batch_size),
+                algorithm.settings));
+            for (unsigned layer = 0; layer < active_batch_size; ++layer) {
+                accumulate_quality(accumulator,
+                    reconstruct(state, layer),
+                    selected_sources[layer],
+                    state.quality_references[source_offset + layer]);
             }
-            algorithm.quality = quality_metrics(accumulator);
-            qInfo().noquote() << QStringLiteral("Completed quality metrics for %1").arg(QString::fromStdString(algorithm.name));
         }
-        gl_engine::Framebuffer::unbind();
+        algorithm.quality = quality_metrics(accumulator);
+        qInfo().noquote()
+            << QStringLiteral("Completed quality metrics for %1").arg(QString::fromStdString(algorithm.name));
+    }
 
+    bool write_report(const BenchmarkState& state)
+    {
+        gl_engine::Framebuffer::unbind();
         const auto sampling_iterator = std::ranges::find_if(
-            algorithms, [](const Algorithm& algorithm) { return algorithm.operation == Operation::SamplingOnly; });
-        const auto checksum_iterator = std::ranges::find_if(
-            algorithms, [](const Algorithm& algorithm) { return algorithm.checksum; });
-        if (sampling_iterator == algorithms.end() || checksum_iterator == algorithms.end())
+            state.algorithms, [](const Algorithm& algorithm) { return algorithm.operation == Operation::SamplingOnly; });
+        if (sampling_iterator == state.algorithms.end())
             return false;
 
         std::ostringstream report;
@@ -631,14 +716,21 @@ private:
                << repetitions << ").\n"
                << "Quality is an untimed pass over all " << m_sources.size()
                << " source textures at mip level 0 (512x512). PSNR uses linear RGB; SSIM uses sRGB luma.\n"
-               << std::left << std::setw(29) << "algorithm"
+               << std::left << std::setw(53) << "algorithm"
                << std::right << std::setw(12) << "raw mean" << std::setw(14) << "raw mean SD"
                << std::setw(8) << "n" << std::setw(17) << "minus sample"
                << std::setw(18) << "adjusted mean SD" << std::setw(17) << "encoding only"
                << std::setw(18) << "encoding mean SD" << std::setw(13) << "PSNR (dB)"
                << std::setw(11) << "SSIM" << '\n';
 
-        for (const auto& algorithm : algorithms) {
+        for (const auto& algorithm : state.algorithms) {
+            const auto checksum_iterator
+                = std::ranges::find_if(state.algorithms, [&algorithm](const Algorithm& candidate) {
+                      return candidate.checksum
+                          && candidate.settings.transfer_mode == algorithm.settings.transfer_mode;
+                  });
+            if (algorithm.operation == Operation::Compression && checksum_iterator == state.algorithms.end())
+                return false;
             std::vector<double> sampling_subtracted;
             std::vector<double> encoding_only;
             sampling_subtracted.reserve(algorithm.samples.size());
@@ -651,7 +743,7 @@ private:
             const auto raw = mean_statistics(algorithm.samples);
             const auto adjusted = mean_statistics(sampling_subtracted);
             const auto encoding = mean_statistics(encoding_only);
-            report << std::left << std::setw(29) << algorithm.name << std::right << std::fixed << std::setprecision(3)
+            report << std::left << std::setw(53) << algorithm.name << std::right << std::fixed << std::setprecision(3)
                    << std::setw(12) << raw.mean << std::setw(14) << raw.mean_standard_deviation
                    << std::setw(8) << raw.sample_count << std::setw(17) << adjusted.mean
                    << std::setw(18) << adjusted.mean_standard_deviation;
@@ -675,6 +767,56 @@ private:
         return true;
     }
 
+    bool advance_benchmark()
+    {
+        auto& state = *m_benchmark_state;
+        if (!state.destination_initialised)
+            return advance_startup(state);
+        if (state.phase == BenchmarkState::Phase::Timing) {
+            if (state.algorithm_position == 0)
+                std::ranges::shuffle(state.algorithm_order, state.random_engine);
+            auto& algorithm = state.algorithms[state.algorithm_order[state.algorithm_position]];
+            for (int batch = 0; batch < warmup_batches; ++batch)
+                static_cast<void>(run_timed_batch(state, algorithm, state.workloads[size_t(state.repetition)][size_t(batch)]));
+            for (int batch = 0; batch < measured_batches; ++batch) {
+                algorithm.samples.push_back(run_timed_batch(
+                    state, algorithm, state.workloads[size_t(state.repetition)][size_t(warmup_batches + batch)]));
+            }
+            if (++state.algorithm_position == state.algorithm_order.size()) {
+                state.algorithm_position = 0;
+                qInfo().noquote()
+                    << QStringLiteral("Completed repetition %1/%2").arg(state.repetition + 1).arg(repetitions);
+                if (++state.repetition == repetitions)
+                    state.phase = BenchmarkState::Phase::QualitySetup;
+            }
+            return true;
+        }
+
+        if (state.phase == BenchmarkState::Phase::QualitySetup) {
+            prepare_quality(state);
+            state.phase = BenchmarkState::Phase::Quality;
+            return true;
+        }
+
+        if (state.phase == BenchmarkState::Phase::Quality) {
+            while (state.quality_algorithm < state.algorithms.size()) {
+                auto& algorithm = state.algorithms[state.quality_algorithm++];
+                if (algorithm.operation == Operation::Compression && !algorithm.checksum) {
+                    compute_quality(state, algorithm);
+                    return true;
+                }
+            }
+            state.phase = BenchmarkState::Phase::Report;
+            return true;
+        }
+
+        if (!write_report(state))
+            return false;
+        m_benchmark_state.reset();
+        ++m_batch_index;
+        return true;
+    }
+
     void fail(const QString& message)
     {
         qInfo().noquote() << message;
@@ -687,7 +829,8 @@ private:
     QString m_download_error;
     int m_downloads_remaining = 0;
     bool m_data_ready = false;
-    bool m_benchmark_started = false;
+    size_t m_batch_index = 0;
+    std::unique_ptr<BenchmarkState> m_benchmark_state;
     uint64_t m_pixel_checksum = 0;
 };
 

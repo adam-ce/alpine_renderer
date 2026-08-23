@@ -100,11 +100,18 @@ public:
         Checksum
     };
 
+    enum class TransferMode {
+        PackedRGBA8,
+        DirectRG32UI,
+        PairedRGBA32UI,
+    };
+
     struct Settings {
         nucleus::utils::ColourTexture::Format algorithm = nucleus::utils::ColourTexture::Format::DXT1;
         unsigned effort = 0;
         Encoder encoder = Encoder::Search;
         bool generate_mipmaps = true;
+        TransferMode transfer_mode = TransferMode::PackedRGBA8;
     };
 
     struct Result {

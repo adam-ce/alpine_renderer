@@ -8,7 +8,11 @@ uniform highp int mip_levels;
 uniform highp int level_offsets[max_mip_levels];
 uniform highp int level_blocks_x[max_mip_levels];
 uniform highp int level_blocks_y[max_mip_levels];
+#ifdef ALP_COMPRESS_TWO_BLOCKS
+layout(location = 0) out highp uvec4 encoded_blocks;
+#else
 layout(location = 0) out highp uvec2 encoded_block;
+#endif
 uniform highp int effort;
 
 highp uvec3 unpack_565(highp uint value)
@@ -448,12 +452,8 @@ highp uvec2 compress_block(highp ivec2 block,
 #endif
 }
 
-void main()
+highp uvec2 compress_block_at_index(highp int output_index)
 {
-    highp int output_index = int(gl_FragCoord.y) * atlas_width + int(gl_FragCoord.x);
-    if (output_index >= total_blocks)
-        discard;
-
     highp int level = 0;
     for (int candidate = 1; candidate < max_mip_levels; ++candidate) {
         if (candidate >= mip_levels || output_index < level_offsets[candidate])
@@ -468,5 +468,23 @@ void main()
     highp int layer = level_index / blocks_per_layer;
     highp int block_index = level_index - layer * blocks_per_layer;
     highp ivec2 block = ivec2(block_index % blocks_x_at_level, block_index / blocks_x_at_level);
-    encoded_block = compress_block(block, layer, level, max(1, texture_width >> level), max(1, texture_height >> level));
+    return compress_block(block, layer, level, max(1, texture_width >> level), max(1, texture_height >> level));
+}
+
+void main()
+{
+    highp int output_index = int(gl_FragCoord.y) * atlas_width + int(gl_FragCoord.x);
+#ifdef ALP_COMPRESS_TWO_BLOCKS
+    output_index *= 2;
+#endif
+    if (output_index >= total_blocks)
+        discard;
+
+#ifdef ALP_COMPRESS_TWO_BLOCKS
+    highp uvec2 first = compress_block_at_index(output_index);
+    highp uvec2 second = output_index + 1 < total_blocks ? compress_block_at_index(output_index + 1) : uvec2(0u);
+    encoded_blocks = uvec4(first, second);
+#else
+    encoded_block = compress_block_at_index(output_index);
+#endif
 }

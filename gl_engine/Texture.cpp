@@ -390,13 +390,17 @@ struct gl_engine::TextureCompressor::Impl {
     unsigned scratch_layers = 0;
     GLsizei block_atlas_width = 0;
     GLsizei block_atlas_height = 0;
+    GLsizei paired_atlas_width = 0;
+    GLsizei paired_atlas_height = 0;
     GLsizei output_atlas_width = 0;
     GLsizei output_atlas_height = 0;
     GLuint scratch_texture = 0;
     GLuint encoded_texture = 0;
+    GLuint paired_encoded_texture = 0;
     GLuint encoded_buffer = 0;
     GLuint vertex_array = 0;
     GLuint encoding_framebuffer = 0;
+    GLuint paired_encoding_framebuffer = 0;
     GLuint packing_framebuffer = 0;
     GLuint packing_renderbuffer = 0;
     std::unique_ptr<ShaderProgram> dxt1_fragment_program;
@@ -405,6 +409,12 @@ struct gl_engine::TextureCompressor::Impl {
     std::unique_ptr<ShaderProgram> etc1_fast_split_fused_exact_residual_fragment_program;
     std::unique_ptr<ShaderProgram> etc1_fast_split_fused_exact_shared_residual_fragment_program;
     std::unique_ptr<ShaderProgram> checksum_fragment_program;
+    std::unique_ptr<ShaderProgram> paired_dxt1_fragment_program;
+    std::unique_ptr<ShaderProgram> paired_etc1_fragment_program;
+    std::unique_ptr<ShaderProgram> paired_etc1_fast_split_fused_exact_fragment_program;
+    std::unique_ptr<ShaderProgram> paired_etc1_fast_split_fused_exact_residual_fragment_program;
+    std::unique_ptr<ShaderProgram> paired_etc1_fast_split_fused_exact_shared_residual_fragment_program;
+    std::unique_ptr<ShaderProgram> paired_checksum_fragment_program;
     std::unique_ptr<ShaderProgram> packing_program;
 
     Impl(unsigned texture_width, unsigned texture_height, unsigned maximum_batch_size)
@@ -433,12 +443,19 @@ struct gl_engine::TextureCompressor::Impl {
             return std::pair(atlas_width, atlas_height);
         };
         std::tie(block_atlas_width, block_atlas_height) = atlas_size(maximum_size / 8, maximum_texture_size);
+        std::tie(paired_atlas_width, paired_atlas_height)
+            = atlas_size((maximum_size + 15) / 16, maximum_texture_size);
         std::tie(output_atlas_width, output_atlas_height) = atlas_size(maximum_size / 4, maximum_renderbuffer_size);
 
         f->glGenBuffers(1, &encoded_buffer);
         f->glBindBuffer(GL_PIXEL_PACK_BUFFER, encoded_buffer);
+        const auto encoded_buffer_size = std::max({
+            size_t(block_atlas_width) * size_t(block_atlas_height) * 8,
+            size_t(paired_atlas_width) * size_t(paired_atlas_height) * 16,
+            size_t(output_atlas_width) * size_t(output_atlas_height) * 4,
+        });
         f->glBufferData(GL_PIXEL_PACK_BUFFER,
-            GLsizeiptr(size_t(output_atlas_width) * size_t(output_atlas_height) * 4),
+            GLsizeiptr(encoded_buffer_size),
             nullptr,
             GL_STREAM_DRAW);
         f->glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
@@ -466,6 +483,19 @@ struct gl_engine::TextureCompressor::Impl {
         f->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, encoded_texture, 0);
         Q_ASSERT(f->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
 
+        f->glGenTextures(1, &paired_encoded_texture);
+        f->glBindTexture(GL_TEXTURE_2D, paired_encoded_texture);
+        f->glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32UI, paired_atlas_width, paired_atlas_height);
+        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        f->glGenFramebuffers(1, &paired_encoding_framebuffer);
+        f->glBindFramebuffer(GL_FRAMEBUFFER, paired_encoding_framebuffer);
+        f->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, paired_encoded_texture, 0);
+        Q_ASSERT(f->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+
         f->glGenFramebuffers(1, &packing_framebuffer);
         f->glGenRenderbuffers(1, &packing_renderbuffer);
         f->glBindRenderbuffer(GL_RENDERBUFFER, packing_renderbuffer);
@@ -480,36 +510,66 @@ struct gl_engine::TextureCompressor::Impl {
         f->glBindRenderbuffer(GL_RENDERBUFFER, GLuint(previous_renderbuffer));
         f->glBindTexture(GL_TEXTURE_2D, GLuint(previous_texture));
 
-        dxt1_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
-            "texture_compress.vert",
-            ShaderCodeSource::FILE);
-        etc1_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
-            "texture_compress.vert",
-            ShaderCodeSource::FILE,
-            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1") });
-        etc1_fast_split_fused_exact_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
-            "texture_compress.vert",
-            ShaderCodeSource::FILE,
-            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1"), QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED") });
-        etc1_fast_split_fused_exact_residual_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
-            "texture_compress.vert",
-            ShaderCodeSource::FILE,
-            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1"),
-                QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"),
-                QStringLiteral("#define ALP_COMPRESS_ETC1_REFINE_RESIDUAL") });
-        etc1_fast_split_fused_exact_shared_residual_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
-            "texture_compress.vert",
-            ShaderCodeSource::FILE,
-            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_ETC1"),
-                QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"),
-                QStringLiteral("#define ALP_COMPRESS_ETC1_REFINE_SHARED_RESIDUAL") });
-        checksum_fragment_program = std::make_unique<ShaderProgram>("texture_compress_raster.vert",
-            "texture_compress.vert",
-            ShaderCodeSource::FILE,
-            std::vector<QString> { QStringLiteral("#define ALP_COMPRESS_CHECKSUM") });
-        packing_program = std::make_unique<ShaderProgram>(
-            "texture_compress_raster.vert", "texture_compress_pack.frag", ShaderCodeSource::FILE);
+    }
 
+    ShaderProgram* paired_program(Encoder encoder, nucleus::utils::ColourTexture::Format algorithm)
+    {
+        auto* program = &paired_dxt1_fragment_program;
+        std::vector<QString> defines { QStringLiteral("#define ALP_COMPRESS_TWO_BLOCKS") };
+        if (encoder == Encoder::Checksum) {
+            program = &paired_checksum_fragment_program;
+            defines.push_back(QStringLiteral("#define ALP_COMPRESS_CHECKSUM"));
+        } else if (algorithm == nucleus::utils::ColourTexture::Format::ETC1) {
+            program = &paired_etc1_fragment_program;
+            defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1"));
+            if (encoder == Encoder::FastSplitFusedExact) {
+                program = &paired_etc1_fast_split_fused_exact_fragment_program;
+                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"));
+            } else if (encoder == Encoder::FastSplitFusedExactResidual) {
+                program = &paired_etc1_fast_split_fused_exact_residual_fragment_program;
+                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"));
+                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_REFINE_RESIDUAL"));
+            } else if (encoder == Encoder::FastSplitFusedExactSharedResidual) {
+                program = &paired_etc1_fast_split_fused_exact_shared_residual_fragment_program;
+                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"));
+                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_REFINE_SHARED_RESIDUAL"));
+            }
+        }
+        if (!*program) {
+            *program = std::make_unique<ShaderProgram>(
+                "texture_compress_raster.vert", "texture_compress.vert", ShaderCodeSource::FILE, defines);
+        }
+        return program->get();
+    }
+
+    ShaderProgram* single_program(Encoder encoder, nucleus::utils::ColourTexture::Format algorithm)
+    {
+        auto* program = &dxt1_fragment_program;
+        std::vector<QString> defines;
+        if (encoder == Encoder::Checksum) {
+            program = &checksum_fragment_program;
+            defines.push_back(QStringLiteral("#define ALP_COMPRESS_CHECKSUM"));
+        } else if (algorithm == nucleus::utils::ColourTexture::Format::ETC1) {
+            program = &etc1_fragment_program;
+            defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1"));
+            if (encoder == Encoder::FastSplitFusedExact) {
+                program = &etc1_fast_split_fused_exact_fragment_program;
+                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"));
+            } else if (encoder == Encoder::FastSplitFusedExactResidual) {
+                program = &etc1_fast_split_fused_exact_residual_fragment_program;
+                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"));
+                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_REFINE_RESIDUAL"));
+            } else if (encoder == Encoder::FastSplitFusedExactSharedResidual) {
+                program = &etc1_fast_split_fused_exact_shared_residual_fragment_program;
+                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"));
+                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_REFINE_SHARED_RESIDUAL"));
+            }
+        }
+        if (!*program) {
+            *program = std::make_unique<ShaderProgram>(
+                "texture_compress_raster.vert", "texture_compress.vert", ShaderCodeSource::FILE, defines);
+        }
+        return program->get();
     }
 
     ~Impl()
@@ -520,14 +580,22 @@ struct gl_engine::TextureCompressor::Impl {
         etc1_fast_split_fused_exact_residual_fragment_program.reset();
         etc1_fast_split_fused_exact_shared_residual_fragment_program.reset();
         checksum_fragment_program.reset();
+        paired_dxt1_fragment_program.reset();
+        paired_etc1_fragment_program.reset();
+        paired_etc1_fast_split_fused_exact_fragment_program.reset();
+        paired_etc1_fast_split_fused_exact_residual_fragment_program.reset();
+        paired_etc1_fast_split_fused_exact_shared_residual_fragment_program.reset();
+        paired_checksum_fragment_program.reset();
         packing_program.reset();
         if (!QOpenGLContext::currentContext())
             return;
         auto* f = QOpenGLContext::currentContext()->extraFunctions();
         f->glDeleteFramebuffers(1, &encoding_framebuffer);
+        f->glDeleteFramebuffers(1, &paired_encoding_framebuffer);
         f->glDeleteFramebuffers(1, &packing_framebuffer);
         f->glDeleteRenderbuffers(1, &packing_renderbuffer);
         f->glDeleteTextures(1, &encoded_texture);
+        f->glDeleteTextures(1, &paired_encoded_texture);
         f->glDeleteVertexArrays(1, &vertex_array);
         f->glDeleteBuffers(1, &encoded_buffer);
         if (scratch_texture)
@@ -663,20 +731,16 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
     GLboolean cull_enabled = GL_FALSE;
     GLboolean depth_enabled = GL_FALSE;
     GLboolean scissor_enabled = GL_FALSE;
+    const auto paired_blocks = settings.transfer_mode == TransferMode::PairedRGBA32UI;
+    const auto total_blocks = total_encoded_size / 8;
+    const auto encoding_pixels = paired_blocks ? (total_blocks + 1) / 2 : total_blocks;
+    const auto maximum_encoding_width = paired_blocks ? m->paired_atlas_width : m->block_atlas_width;
+    const auto encoding_width = GLsizei(std::min(encoding_pixels, size_t(maximum_encoding_width)));
+    const auto encoding_height = GLsizei((encoding_pixels + size_t(encoding_width) - 1) / size_t(encoding_width));
 
     {
-        auto* program = m->dxt1_fragment_program.get();
-        if (settings.encoder == Encoder::Checksum) {
-            program = m->checksum_fragment_program.get();
-        } else if (settings.algorithm == nucleus::utils::ColourTexture::Format::ETC1) {
-            program = m->etc1_fragment_program.get();
-            if (settings.encoder == Encoder::FastSplitFusedExact)
-                program = m->etc1_fast_split_fused_exact_fragment_program.get();
-            else if (settings.encoder == Encoder::FastSplitFusedExactResidual)
-                program = m->etc1_fast_split_fused_exact_residual_fragment_program.get();
-            else if (settings.encoder == Encoder::FastSplitFusedExactSharedResidual)
-                program = m->etc1_fast_split_fused_exact_shared_residual_fragment_program.get();
-        }
+        auto* program = paired_blocks ? m->paired_program(settings.encoder, settings.algorithm)
+                                      : m->single_program(settings.encoder, settings.algorithm);
         f->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_framebuffer);
         f->glGetIntegerv(GL_VIEWPORT, previous_viewport);
         f->glGetBooleanv(GL_COLOR_WRITEMASK, previous_colour_mask);
@@ -691,15 +755,16 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
         f->glDisable(GL_SCISSOR_TEST);
         f->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
-        f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m->encoding_framebuffer);
-        f->glViewport(0, 0, m->block_atlas_width, m->block_atlas_height);
+        f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER,
+            paired_blocks ? m->paired_encoding_framebuffer : m->encoding_framebuffer);
+        f->glViewport(0, 0, encoding_width, encoding_height);
         program->bind();
         program->set_uniform("source_texture", 7);
         program->set_uniform("texture_width", int(m->width));
         program->set_uniform("texture_height", int(m->height));
         program->set_uniform("effort", int(settings.effort));
-        program->set_uniform("atlas_width", int(m->block_atlas_width));
-        program->set_uniform("total_blocks", int(total_encoded_size / 8));
+        program->set_uniform("atlas_width", int(encoding_width));
+        program->set_uniform("total_blocks", int(total_blocks));
         program->set_uniform("mip_levels", int(result.mip_levels));
         program->set_uniform_array("level_offsets", level_offsets_blocks);
         program->set_uniform_array("level_blocks_x", level_blocks_x);
@@ -708,34 +773,51 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
         f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
         f->glBindVertexArray(m->vertex_array);
         f->glDrawArrays(GL_TRIANGLES, 0, 3);
+        program->release();
     }
 
-    {
+    GLsizei readback_width = encoding_width;
+    GLsizei readback_height = encoding_height;
+    GLuint readback_framebuffer = paired_blocks ? m->paired_encoding_framebuffer : m->encoding_framebuffer;
+    GLenum readback_format = paired_blocks ? GL_RGBA_INTEGER : GL_RG_INTEGER;
+    GLenum readback_type = GL_UNSIGNED_INT;
+    if (settings.transfer_mode == TransferMode::PackedRGBA8) {
+        if (!m->packing_program) {
+            m->packing_program = std::make_unique<ShaderProgram>(
+                "texture_compress_raster.vert", "texture_compress_pack.frag", ShaderCodeSource::FILE);
+        }
+        const auto output_pixels = total_blocks * 2;
+        readback_width = GLsizei(std::min(output_pixels, size_t(m->output_atlas_width)));
+        readback_height = GLsizei((output_pixels + size_t(readback_width) - 1) / size_t(readback_width));
+        readback_framebuffer = m->packing_framebuffer;
+        readback_format = GL_RGBA_INTEGER;
+        readback_type = GL_UNSIGNED_BYTE;
+
         f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m->packing_framebuffer);
-        f->glViewport(0, 0, m->output_atlas_width, m->output_atlas_height);
+        f->glViewport(0, 0, readback_width, readback_height);
         m->packing_program->bind();
         m->packing_program->set_uniform("encoded_blocks", 6);
-        m->packing_program->set_uniform("block_atlas_width", int(m->block_atlas_width));
-        m->packing_program->set_uniform("output_atlas_width", int(m->output_atlas_width));
-        m->packing_program->set_uniform("total_blocks", int(total_encoded_size / 8));
+        m->packing_program->set_uniform("block_atlas_width", int(encoding_width));
+        m->packing_program->set_uniform("output_atlas_width", int(readback_width));
+        m->packing_program->set_uniform("total_blocks", int(total_blocks));
         f->glActiveTexture(GL_TEXTURE6);
         f->glBindTexture(GL_TEXTURE_2D, m->encoded_texture);
         f->glDrawArrays(GL_TRIANGLES, 0, 3);
-        f->glBindVertexArray(0);
         m->packing_program->release();
-
-        if (blend_enabled)
-            f->glEnable(GL_BLEND);
-        if (cull_enabled)
-            f->glEnable(GL_CULL_FACE);
-        if (depth_enabled)
-            f->glEnable(GL_DEPTH_TEST);
-        if (scissor_enabled)
-            f->glEnable(GL_SCISSOR_TEST);
-        f->glColorMask(previous_colour_mask[0], previous_colour_mask[1], previous_colour_mask[2], previous_colour_mask[3]);
-        f->glViewport(previous_viewport[0], previous_viewport[1], previous_viewport[2], previous_viewport[3]);
-        f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(previous_draw_framebuffer));
     }
+
+    f->glBindVertexArray(0);
+    if (blend_enabled)
+        f->glEnable(GL_BLEND);
+    if (cull_enabled)
+        f->glEnable(GL_CULL_FACE);
+    if (depth_enabled)
+        f->glEnable(GL_DEPTH_TEST);
+    if (scissor_enabled)
+        f->glEnable(GL_SCISSOR_TEST);
+    f->glColorMask(previous_colour_mask[0], previous_colour_mask[1], previous_colour_mask[2], previous_colour_mask[3]);
+    f->glViewport(previous_viewport[0], previous_viewport[1], previous_viewport[2], previous_viewport[3]);
+    f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(previous_draw_framebuffer));
 
     {
         GLint previous_read_framebuffer = 0;
@@ -744,11 +826,11 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
         f->glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_framebuffer);
         f->glGetIntegerv(GL_READ_BUFFER, &previous_read_buffer);
         f->glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack_alignment);
-        f->glBindFramebuffer(GL_READ_FRAMEBUFFER, m->packing_framebuffer);
+        f->glBindFramebuffer(GL_READ_FRAMEBUFFER, readback_framebuffer);
         f->glReadBuffer(GL_COLOR_ATTACHMENT0);
         f->glPixelStorei(GL_PACK_ALIGNMENT, 1);
         f->glBindBuffer(GL_PIXEL_PACK_BUFFER, m->encoded_buffer);
-        f->glReadPixels(0, 0, m->output_atlas_width, m->output_atlas_height, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, nullptr);
+        f->glReadPixels(0, 0, readback_width, readback_height, readback_format, readback_type, nullptr);
         f->glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
         f->glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
         f->glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(previous_read_framebuffer));
