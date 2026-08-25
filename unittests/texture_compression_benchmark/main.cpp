@@ -47,7 +47,6 @@ using Clock = std::chrono::steady_clock;
 using Raster = radix::Raster<glm::u8vec4>;
 using Format = nucleus::utils::ColourTexture::Format;
 using Encoder = gl_engine::TextureCompressor::Encoder;
-using TransferMode = gl_engine::TextureCompressor::TransferMode;
 
 constexpr unsigned resolution = 512;
 constexpr unsigned max_batch_size = 4;
@@ -295,46 +294,43 @@ const char* format_name(Format format)
     return "unknown";
 }
 
+const char* readback_mode_name(gl_engine::TextureCompressor::ReadbackMode mode)
+{
+    using ReadbackMode = gl_engine::TextureCompressor::ReadbackMode;
+    switch (mode) {
+    case ReadbackMode::RG32UI:
+        return "direct RG32UI";
+    case ReadbackMode::RGBA32UI:
+        return "paired RGBA32UI";
+    }
+    return "unknown";
+}
+
 std::vector<Algorithm> supported_algorithms(Format format)
 {
-    const auto settings = [format](Encoder encoder, TransferMode transfer_mode) {
+    const auto settings = [format](Encoder encoder) {
         return gl_engine::TextureCompressor::Settings {
             .algorithm = format,
             .effort = 0,
             .encoder = encoder,
             .generate_mipmaps = true,
-            .transfer_mode = transfer_mode,
         };
     };
 
     std::vector<Algorithm> result;
-    result.push_back(
-        { "sampling only", Operation::SamplingOnly, settings(Encoder::Checksum, TransferMode::PackedRGBA8) });
-    const std::array<std::pair<TransferMode, const char*>, 3> transfer_modes { {
-        { TransferMode::PackedRGBA8, "packed RGBA8" },
-        { TransferMode::DirectRG32UI, "direct RG32UI" },
-        { TransferMode::PairedRGBA32UI, "paired RGBA32UI" },
-    } };
-    for (const auto& [transfer_mode, transfer_name] : transfer_modes) {
-        result.push_back({ std::string("checksum / ") + transfer_name,
+    result.push_back({ "sampling only", Operation::SamplingOnly, settings(Encoder::Checksum) });
+    result.push_back({ "checksum", Operation::Compression, settings(Encoder::Checksum), true });
+    if (format == Format::DXT1) {
+        result.push_back({ "DXT1", Operation::Compression, settings(Encoder::Dxt1) });
+    } else if (format == Format::ETC1) {
+        result.push_back(
+            { "ETC1 fused exact", Operation::Compression, settings(Encoder::FastSplitFusedExact) });
+        result.push_back({ "ETC1 fused exact residual fit",
             Operation::Compression,
-            settings(Encoder::Checksum, transfer_mode),
-            true });
-        if (format == Format::DXT1) {
-            result.push_back({ std::string("DXT1 / ") + transfer_name,
-                Operation::Compression,
-                settings(Encoder::Dxt1, transfer_mode) });
-        } else if (format == Format::ETC1) {
-            result.push_back({ std::string("ETC1 fused exact / ") + transfer_name,
-                Operation::Compression,
-                settings(Encoder::FastSplitFusedExact, transfer_mode) });
-            result.push_back({ std::string("ETC1 fused exact residual fit / ") + transfer_name,
-                Operation::Compression,
-                settings(Encoder::FastSplitFusedExactResidual, transfer_mode) });
-            result.push_back({ std::string("ETC1 fused exact shared residual / ") + transfer_name,
-                Operation::Compression,
-                settings(Encoder::FastSplitFusedExactSharedResidual, transfer_mode) });
-        }
+            settings(Encoder::FastSplitFusedExactResidual) });
+        result.push_back({ "ETC1 fused exact shared residual",
+            Operation::Compression,
+            settings(Encoder::FastSplitFusedExactSharedResidual) });
     }
     return result;
 }
@@ -565,14 +561,16 @@ private:
                                                "GL renderer: %2\n"
                                                "GL version: %3\n"
                                                "Compression format: %4\n"
-                                               "Random seed: 0x%5\n"
-                                               "Batch: %6 x 512x512 base-level textures, with mipmaps\n"
-                                               "Schedule: %7 repetitions, %8 warm-up + %9 measured batches per algorithm\n"
+                                               "Readback: %5\n"
+                                               "Random seed: 0x%6\n"
+                                               "Batch: %7 x 512x512 base-level textures, with mipmaps\n"
+                                               "Schedule: %8 repetitions, %9 warm-up + %10 measured batches per algorithm\n"
                                                "Timer: steady-clock wall time through dependent one-pixel framebuffer readback\n")
                                      .arg(QString::fromStdString(gl_string(GL_VENDOR)))
                                      .arg(QString::fromStdString(gl_string(GL_RENDERER)))
                                      .arg(QString::fromStdString(gl_string(GL_VERSION)))
                                      .arg(QString::fromLatin1(format_name(state.format)))
+                                     .arg(QString::fromLatin1(readback_mode_name(state.compressor->readback_mode())))
                                      .arg(QString::number(random_seed, 16))
                                      .arg(state.batch_size)
                                      .arg(repetitions)
@@ -725,9 +723,8 @@ private:
 
         for (const auto& algorithm : state.algorithms) {
             const auto checksum_iterator
-                = std::ranges::find_if(state.algorithms, [&algorithm](const Algorithm& candidate) {
-                      return candidate.checksum
-                          && candidate.settings.transfer_mode == algorithm.settings.transfer_mode;
+                = std::ranges::find_if(state.algorithms, [](const Algorithm& candidate) {
+                      return candidate.checksum;
                   });
             if (algorithm.operation == Operation::Compression && checksum_iterator == state.algorithms.end())
                 return false;

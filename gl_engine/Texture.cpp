@@ -20,6 +20,7 @@
 #include "ShaderProgram.h"
 #include "nucleus/utils/ColourTexture.h"
 
+#include <QDebug>
 #include <QOpenGLExtraFunctions>
 #include <QOpenGLFunctions>
 #include <QtAssert>
@@ -392,8 +393,6 @@ struct gl_engine::TextureCompressor::Impl {
     GLsizei block_atlas_height = 0;
     GLsizei paired_atlas_width = 0;
     GLsizei paired_atlas_height = 0;
-    GLsizei output_atlas_width = 0;
-    GLsizei output_atlas_height = 0;
     GLuint scratch_texture = 0;
     GLuint encoded_texture = 0;
     GLuint paired_encoded_texture = 0;
@@ -401,8 +400,7 @@ struct gl_engine::TextureCompressor::Impl {
     GLuint vertex_array = 0;
     GLuint encoding_framebuffer = 0;
     GLuint paired_encoding_framebuffer = 0;
-    GLuint packing_framebuffer = 0;
-    GLuint packing_renderbuffer = 0;
+    ReadbackMode readback_mode = ReadbackMode::RG32UI;
     std::unique_ptr<ShaderProgram> dxt1_fragment_program;
     std::unique_ptr<ShaderProgram> etc1_fragment_program;
     std::unique_ptr<ShaderProgram> etc1_fast_split_fused_exact_fragment_program;
@@ -415,7 +413,6 @@ struct gl_engine::TextureCompressor::Impl {
     std::unique_ptr<ShaderProgram> paired_etc1_fast_split_fused_exact_residual_fragment_program;
     std::unique_ptr<ShaderProgram> paired_etc1_fast_split_fused_exact_shared_residual_fragment_program;
     std::unique_ptr<ShaderProgram> paired_checksum_fragment_program;
-    std::unique_ptr<ShaderProgram> packing_program;
 
     Impl(unsigned texture_width, unsigned texture_height, unsigned maximum_batch_size)
         : width(texture_width)
@@ -432,9 +429,7 @@ struct gl_engine::TextureCompressor::Impl {
         }
         maximum_size *= max_batch_size;
 
-        GLint maximum_renderbuffer_size = 0;
         GLint maximum_texture_size = 0;
-        f->glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &maximum_renderbuffer_size);
         f->glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum_texture_size);
         const auto atlas_size = [](size_t pixels, GLint maximum_dimension) {
             const auto atlas_width = GLsizei(std::min({ pixels, size_t(maximum_dimension), size_t(256) }));
@@ -445,14 +440,12 @@ struct gl_engine::TextureCompressor::Impl {
         std::tie(block_atlas_width, block_atlas_height) = atlas_size(maximum_size / 8, maximum_texture_size);
         std::tie(paired_atlas_width, paired_atlas_height)
             = atlas_size((maximum_size + 15) / 16, maximum_texture_size);
-        std::tie(output_atlas_width, output_atlas_height) = atlas_size(maximum_size / 4, maximum_renderbuffer_size);
 
         f->glGenBuffers(1, &encoded_buffer);
         f->glBindBuffer(GL_PIXEL_PACK_BUFFER, encoded_buffer);
         const auto encoded_buffer_size = std::max({
             size_t(block_atlas_width) * size_t(block_atlas_height) * 8,
             size_t(paired_atlas_width) * size_t(paired_atlas_height) * 16,
-            size_t(output_atlas_width) * size_t(output_atlas_height) * 4,
         });
         f->glBufferData(GL_PIXEL_PACK_BUFFER,
             GLsizeiptr(encoded_buffer_size),
@@ -463,11 +456,9 @@ struct gl_engine::TextureCompressor::Impl {
 
         GLint previous_draw_framebuffer = 0;
         GLint previous_read_framebuffer = 0;
-        GLint previous_renderbuffer = 0;
         GLint previous_texture = 0;
         f->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_framebuffer);
         f->glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_framebuffer);
-        f->glGetIntegerv(GL_RENDERBUFFER_BINDING, &previous_renderbuffer);
         f->glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
 
         f->glGenTextures(1, &encoded_texture);
@@ -481,33 +472,41 @@ struct gl_engine::TextureCompressor::Impl {
         f->glGenFramebuffers(1, &encoding_framebuffer);
         f->glBindFramebuffer(GL_FRAMEBUFFER, encoding_framebuffer);
         f->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, encoded_texture, 0);
-        Q_ASSERT(f->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+        const auto encoding_framebuffer_status = f->glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        GLint implementation_read_format = 0;
+        GLint implementation_read_type = 0;
+        if (encoding_framebuffer_status == GL_FRAMEBUFFER_COMPLETE) {
+            f->glReadBuffer(GL_COLOR_ATTACHMENT0);
+            f->glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_FORMAT, &implementation_read_format);
+            f->glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_TYPE, &implementation_read_type);
+        }
+        if (encoding_framebuffer_status != GL_FRAMEBUFFER_COMPLETE
+            || implementation_read_format != GL_RG_INTEGER
+            || implementation_read_type != GL_UNSIGNED_INT) {
+            readback_mode = ReadbackMode::RGBA32UI;
+            qInfo().noquote()
+                << QStringLiteral("RG32UI readback is unavailable (framebuffer 0x%1, format 0x%2, type 0x%3); falling back to paired RGBA32UI readback.")
+                       .arg(unsigned(encoding_framebuffer_status), 0, 16)
+                       .arg(unsigned(implementation_read_format), 0, 16)
+                       .arg(unsigned(implementation_read_type), 0, 16);
 
-        f->glGenTextures(1, &paired_encoded_texture);
-        f->glBindTexture(GL_TEXTURE_2D, paired_encoded_texture);
-        f->glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32UI, paired_atlas_width, paired_atlas_height);
-        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            f->glGenTextures(1, &paired_encoded_texture);
+            f->glBindTexture(GL_TEXTURE_2D, paired_encoded_texture);
+            f->glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32UI, paired_atlas_width, paired_atlas_height);
+            f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-        f->glGenFramebuffers(1, &paired_encoding_framebuffer);
-        f->glBindFramebuffer(GL_FRAMEBUFFER, paired_encoding_framebuffer);
-        f->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, paired_encoded_texture, 0);
-        Q_ASSERT(f->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
-
-        f->glGenFramebuffers(1, &packing_framebuffer);
-        f->glGenRenderbuffers(1, &packing_renderbuffer);
-        f->glBindRenderbuffer(GL_RENDERBUFFER, packing_renderbuffer);
-        // RGBA8UI with RGBA_INTEGER/UNSIGNED_BYTE is the portable WebGL 2 integer readback path.
-        // Two pixels hold the two 32-bit words of each compressed block.
-        f->glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8UI, output_atlas_width, output_atlas_height);
-        f->glBindFramebuffer(GL_FRAMEBUFFER, packing_framebuffer);
-        f->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, packing_renderbuffer);
-        Q_ASSERT(f->glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+            f->glGenFramebuffers(1, &paired_encoding_framebuffer);
+            f->glBindFramebuffer(GL_FRAMEBUFFER, paired_encoding_framebuffer);
+            f->glFramebufferTexture2D(
+                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, paired_encoded_texture, 0);
+            if (f->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+                qFatal("Paired RGBA32UI texture compression framebuffer is incomplete");
+        }
         f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(previous_draw_framebuffer));
         f->glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(previous_read_framebuffer));
-        f->glBindRenderbuffer(GL_RENDERBUFFER, GLuint(previous_renderbuffer));
         f->glBindTexture(GL_TEXTURE_2D, GLuint(previous_texture));
 
     }
@@ -586,14 +585,11 @@ struct gl_engine::TextureCompressor::Impl {
         paired_etc1_fast_split_fused_exact_residual_fragment_program.reset();
         paired_etc1_fast_split_fused_exact_shared_residual_fragment_program.reset();
         paired_checksum_fragment_program.reset();
-        packing_program.reset();
         if (!QOpenGLContext::currentContext())
             return;
         auto* f = QOpenGLContext::currentContext()->extraFunctions();
         f->glDeleteFramebuffers(1, &encoding_framebuffer);
         f->glDeleteFramebuffers(1, &paired_encoding_framebuffer);
-        f->glDeleteFramebuffers(1, &packing_framebuffer);
-        f->glDeleteRenderbuffers(1, &packing_renderbuffer);
         f->glDeleteTextures(1, &encoded_texture);
         f->glDeleteTextures(1, &paired_encoded_texture);
         f->glDeleteVertexArrays(1, &vertex_array);
@@ -631,6 +627,11 @@ gl_engine::TextureCompressor::TextureCompressor(unsigned width, unsigned height,
 }
 
 gl_engine::TextureCompressor::~TextureCompressor() = default;
+
+gl_engine::TextureCompressor::ReadbackMode gl_engine::TextureCompressor::readback_mode() const
+{
+    return m->readback_mode;
+}
 
 size_t gl_engine::TextureCompressor::compressed_level_size(unsigned width, unsigned height)
 {
@@ -731,7 +732,7 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
     GLboolean cull_enabled = GL_FALSE;
     GLboolean depth_enabled = GL_FALSE;
     GLboolean scissor_enabled = GL_FALSE;
-    const auto paired_blocks = settings.transfer_mode == TransferMode::PairedRGBA32UI;
+    const auto paired_blocks = m->readback_mode == ReadbackMode::RGBA32UI;
     const auto total_blocks = total_encoded_size / 8;
     const auto encoding_pixels = paired_blocks ? (total_blocks + 1) / 2 : total_blocks;
     const auto maximum_encoding_width = paired_blocks ? m->paired_atlas_width : m->block_atlas_width;
@@ -780,31 +781,6 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
     GLsizei readback_height = encoding_height;
     GLuint readback_framebuffer = paired_blocks ? m->paired_encoding_framebuffer : m->encoding_framebuffer;
     GLenum readback_format = paired_blocks ? GL_RGBA_INTEGER : GL_RG_INTEGER;
-    GLenum readback_type = GL_UNSIGNED_INT;
-    if (settings.transfer_mode == TransferMode::PackedRGBA8) {
-        if (!m->packing_program) {
-            m->packing_program = std::make_unique<ShaderProgram>(
-                "texture_compress_raster.vert", "texture_compress_pack.frag", ShaderCodeSource::FILE);
-        }
-        const auto output_pixels = total_blocks * 2;
-        readback_width = GLsizei(std::min(output_pixels, size_t(m->output_atlas_width)));
-        readback_height = GLsizei((output_pixels + size_t(readback_width) - 1) / size_t(readback_width));
-        readback_framebuffer = m->packing_framebuffer;
-        readback_format = GL_RGBA_INTEGER;
-        readback_type = GL_UNSIGNED_BYTE;
-
-        f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m->packing_framebuffer);
-        f->glViewport(0, 0, readback_width, readback_height);
-        m->packing_program->bind();
-        m->packing_program->set_uniform("encoded_blocks", 6);
-        m->packing_program->set_uniform("block_atlas_width", int(encoding_width));
-        m->packing_program->set_uniform("output_atlas_width", int(readback_width));
-        m->packing_program->set_uniform("total_blocks", int(total_blocks));
-        f->glActiveTexture(GL_TEXTURE6);
-        f->glBindTexture(GL_TEXTURE_2D, m->encoded_texture);
-        f->glDrawArrays(GL_TRIANGLES, 0, 3);
-        m->packing_program->release();
-    }
 
     f->glBindVertexArray(0);
     if (blend_enabled)
@@ -830,7 +806,8 @@ gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std:
         f->glReadBuffer(GL_COLOR_ATTACHMENT0);
         f->glPixelStorei(GL_PACK_ALIGNMENT, 1);
         f->glBindBuffer(GL_PIXEL_PACK_BUFFER, m->encoded_buffer);
-        f->glReadPixels(0, 0, readback_width, readback_height, readback_format, readback_type, nullptr);
+        f->glReadPixels(
+            0, 0, readback_width, readback_height, readback_format, GL_UNSIGNED_INT, nullptr);
         f->glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
         f->glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
         f->glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(previous_read_framebuffer));

@@ -100,10 +100,9 @@ public:
         Checksum
     };
 
-    enum class TransferMode {
-        PackedRGBA8,
-        DirectRG32UI,
-        PairedRGBA32UI,
+    enum class ReadbackMode {
+        RG32UI,
+        RGBA32UI,
     };
 
     struct Settings {
@@ -111,7 +110,6 @@ public:
         unsigned effort = 0;
         Encoder encoder = Encoder::Search;
         bool generate_mipmaps = true;
-        TransferMode transfer_mode = TransferMode::PackedRGBA8;
     };
 
     struct Result {
@@ -134,6 +132,7 @@ public:
     [[nodiscard]] static size_t compressed_level_size(unsigned width, unsigned height);
     [[nodiscard]] static unsigned mip_level_count(unsigned width, unsigned height);
     [[nodiscard]] static bool is_supported();
+    [[nodiscard]] ReadbackMode readback_mode() const;
 
 private:
     struct Impl;
