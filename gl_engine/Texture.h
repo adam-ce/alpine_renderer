@@ -20,10 +20,7 @@
 
 #include <QImage>
 #include <cstdint>
-#include <memory>
 #include <qopengl.h>
-#include <span>
-#include <vector>
 #ifdef ANDROID
 #include <GLES3/gl3.h>
 #endif
@@ -38,6 +35,7 @@ public:
     enum class Target : GLenum { _2d = GL_TEXTURE_2D, _2dArray = GL_TEXTURE_2D_ARRAY }; // no 1D textures in webgl
     enum class Format {
         RGBA8, // normalised on gpu
+        RGB565, // normalised on gpu
         SRGBA8, // normalised on gpu
         CompressedRGBA8, // normalised on gpu, compression format depends on desktop/mobile
         RGBA8UI,
@@ -62,7 +60,8 @@ public:
 
     void bind(unsigned texture_unit);
     void setParams(Filter min_filter, Filter mag_filter, bool anisotropic_filtering = false);
-    void allocate_array(unsigned width, unsigned height, unsigned n_layers);
+    void allocate_array(unsigned width, unsigned height, unsigned n_layers, unsigned mip_levels = 0);
+    void generate_mipmaps();
     void upload(const nucleus::utils::ColourTexture& texture);
     void upload(const nucleus::utils::ColourTexture& texture, unsigned array_index);
     void upload(const nucleus::utils::MipmappedColourTexture& mipped_texture, unsigned array_index);
@@ -87,56 +86,7 @@ private:
     unsigned m_width = unsigned(-1);
     unsigned m_height = unsigned(-1);
     unsigned m_n_layers = unsigned(-1);
-};
-
-class TextureCompressor {
-public:
-    enum class Encoder {
-        Search,
-        Dxt1,
-        FastSplitFusedExact,
-        FastSplitFusedExactResidual,
-        FastSplitFusedExactSharedResidual,
-        Checksum
-    };
-
-    enum class ReadbackMode {
-        RG32UI,
-        RGBA32UI,
-    };
-
-    struct Settings {
-        nucleus::utils::ColourTexture::Format algorithm = nucleus::utils::ColourTexture::Format::DXT1;
-        unsigned effort = 0;
-        Encoder encoder = Encoder::Search;
-        bool generate_mipmaps = true;
-    };
-
-    struct Result {
-        size_t encoded_bytes = 0;
-        unsigned mip_levels = 0;
-    };
-
-    TextureCompressor(unsigned width, unsigned height, unsigned max_batch_size);
-    ~TextureCompressor();
-    TextureCompressor(const TextureCompressor&) = delete;
-    TextureCompressor(TextureCompressor&&) = delete;
-    TextureCompressor& operator=(const TextureCompressor&) = delete;
-    TextureCompressor& operator=(TextureCompressor&&) = delete;
-
-    [[nodiscard]] Result compress(std::span<const radix::Raster<glm::u8vec4>> textures,
-        Texture& destination,
-        std::span<const unsigned> destination_layers,
-        const Settings& settings);
-
-    [[nodiscard]] static size_t compressed_level_size(unsigned width, unsigned height);
-    [[nodiscard]] static unsigned mip_level_count(unsigned width, unsigned height);
-    [[nodiscard]] static bool is_supported();
-    [[nodiscard]] ReadbackMode readback_mode() const;
-
-private:
-    struct Impl;
-    std::unique_ptr<Impl> m;
+    unsigned m_mip_levels = unsigned(-1);
 };
 
 extern template void gl_engine::Texture::upload<uint16_t>(const radix::Raster<uint16_t>&);

@@ -39,6 +39,7 @@
 #include <gl_engine/Framebuffer.h>
 #include <gl_engine/ShaderProgram.h>
 #include <gl_engine/Texture.h>
+#include <gl_engine/TextureCompressor.h>
 #include <gl_engine/helpers.h>
 #include <nucleus/utils/image_loader.h>
 
@@ -46,7 +47,6 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using Raster = radix::Raster<glm::u8vec4>;
 using Format = nucleus::utils::ColourTexture::Format;
-using Encoder = gl_engine::TextureCompressor::Encoder;
 
 constexpr unsigned resolution = 512;
 constexpr unsigned max_batch_size = 4;
@@ -76,6 +76,7 @@ struct Algorithm {
     Operation operation = Operation::Compression;
     gl_engine::TextureCompressor::Settings settings;
     bool checksum = false;
+    std::unique_ptr<gl_engine::TextureCompressor> compressor;
     std::vector<double> samples;
     std::optional<QualityMetrics> quality;
 };
@@ -298,6 +299,8 @@ const char* readback_mode_name(gl_engine::TextureCompressor::ReadbackMode mode)
 {
     using ReadbackMode = gl_engine::TextureCompressor::ReadbackMode;
     switch (mode) {
+    case ReadbackMode::Auto:
+        return "automatic";
     case ReadbackMode::RG32UI:
         return "direct RG32UI";
     case ReadbackMode::RGBA32UI:
@@ -308,29 +311,27 @@ const char* readback_mode_name(gl_engine::TextureCompressor::ReadbackMode mode)
 
 std::vector<Algorithm> supported_algorithms(Format format)
 {
-    const auto settings = [format](Encoder encoder) {
-        return gl_engine::TextureCompressor::Settings {
-            .algorithm = format,
-            .effort = 0,
-            .encoder = encoder,
-            .generate_mipmaps = true,
-        };
+    using Compressor = gl_engine::TextureCompressor;
+    Compressor::Settings checksum_settings {
+        .dxt1_algorithm = Compressor::Dxt1Algorithm::DebugChecksum,
+        .etc_algorithm = Compressor::EtcAlgorithm::DebugChecksum,
     };
 
     std::vector<Algorithm> result;
-    result.push_back({ "sampling only", Operation::SamplingOnly, settings(Encoder::Checksum) });
-    result.push_back({ "checksum", Operation::Compression, settings(Encoder::Checksum), true });
+    result.push_back({ "sampling only", Operation::SamplingOnly, checksum_settings });
+    result.push_back({ "debug checksum", Operation::Compression, checksum_settings, true });
     if (format == Format::DXT1) {
-        result.push_back({ "DXT1", Operation::Compression, settings(Encoder::Dxt1) });
+        result.push_back({ "DXT1 slow search", Operation::Compression, {} });
     } else if (format == Format::ETC1) {
-        result.push_back(
-            { "ETC1 fused exact", Operation::Compression, settings(Encoder::FastSplitFusedExact) });
-        result.push_back({ "ETC1 fused exact residual fit",
+        result.push_back({ "ETC fastest",
             Operation::Compression,
-            settings(Encoder::FastSplitFusedExactResidual) });
-        result.push_back({ "ETC1 fused exact shared residual",
+            { .etc_algorithm = Compressor::EtcAlgorithm::Fastest } });
+        result.push_back({ "ETC fast",
             Operation::Compression,
-            settings(Encoder::FastSplitFusedExactSharedResidual) });
+            { .etc_algorithm = Compressor::EtcAlgorithm::Fast } });
+        result.push_back({ "ETC slow search",
+            Operation::Compression,
+            { .etc_algorithm = Compressor::EtcAlgorithm::SlowSearch } });
     }
     return result;
 }
@@ -346,10 +347,6 @@ public:
 protected:
     void initializeGL() override
     {
-        if (!gl_engine::TextureCompressor::is_supported()) {
-            fail(QStringLiteral("GPU texture compression is not supported by this context."));
-            return;
-        }
         download_data();
     }
 
@@ -381,8 +378,8 @@ private:
         unsigned batch_size = 0;
         Format format = Format::Uncompressed_RGBA;
         std::vector<Algorithm> algorithms;
-        std::unique_ptr<gl_engine::Texture> destination;
-        std::unique_ptr<gl_engine::TextureCompressor> compressor;
+        std::shared_ptr<gl_engine::Texture> scratch;
+        std::shared_ptr<gl_engine::Texture> destination;
         std::unique_ptr<gl_engine::Framebuffer> framebuffer;
         std::unique_ptr<gl_engine::ShaderProgram> sampling_shader;
         gl_engine::helpers::ScreenQuadGeometry sampling_geometry;
@@ -523,14 +520,28 @@ private:
     {
         switch (state.startup_step++) {
         case 0:
-            state.destination = std::make_unique<gl_engine::Texture>(
+            state.scratch = std::make_shared<gl_engine::Texture>(
+                gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::RGBA8);
+            state.scratch->setParams(gl_engine::Texture::Filter::Nearest, gl_engine::Texture::Filter::Linear);
+            state.scratch->allocate_array(resolution,
+                resolution,
+                state.batch_size,
+                gl_engine::TextureCompressor::mip_level_count(resolution, resolution));
+            state.destination = std::make_shared<gl_engine::Texture>(
                 gl_engine::Texture::Target::_2dArray, gl_engine::Texture::Format::CompressedRGBA8);
             state.destination->setParams(gl_engine::Texture::Filter::MipMapLinear, gl_engine::Texture::Filter::Linear);
-            state.destination->allocate_array(resolution, resolution, state.batch_size);
+            state.destination->allocate_array(resolution,
+                resolution,
+                state.batch_size,
+                gl_engine::TextureCompressor::mip_level_count(resolution, resolution));
             return true;
         case 1:
-            state.compressor
-                = std::make_unique<gl_engine::TextureCompressor>(resolution, resolution, state.batch_size);
+            for (auto& algorithm : state.algorithms) {
+                if (algorithm.operation == Operation::Compression) {
+                    algorithm.compressor = std::make_unique<gl_engine::TextureCompressor>(
+                        state.scratch, state.destination, algorithm.settings);
+                }
+            }
             return true;
         case 2:
             state.framebuffer = std::make_unique<gl_engine::Framebuffer>(
@@ -570,7 +581,8 @@ private:
                                      .arg(QString::fromStdString(gl_string(GL_RENDERER)))
                                      .arg(QString::fromStdString(gl_string(GL_VERSION)))
                                      .arg(QString::fromLatin1(format_name(state.format)))
-                                     .arg(QString::fromLatin1(readback_mode_name(state.compressor->readback_mode())))
+                                     .arg(QString::fromLatin1(readback_mode_name(
+                                         *state.algorithms[1].compressor->effective_readback_mode())))
                                      .arg(QString::number(random_seed, 16))
                                      .arg(state.batch_size)
                                      .arg(repetitions)
@@ -579,10 +591,15 @@ private:
             return true;
         default:
             std::vector<Raster> initial_sources(m_sources.begin(), m_sources.begin() + state.batch_size);
-            static_cast<void>(state.compressor->compress(initial_sources,
-                *state.destination,
-                std::span(state.destination_layers).first(state.batch_size),
-                state.algorithms[1].settings));
+            for (size_t layer = 0; layer < initial_sources.size(); ++layer)
+                state.scratch->upload(initial_sources[layer], unsigned(layer));
+            state.scratch->generate_mipmaps();
+            const auto result = state.algorithms[1].compressor->compress(
+                std::span(state.destination_layers).first(state.batch_size));
+            if (!result) {
+                fail(QString::fromStdString(result.error()));
+                return false;
+            }
             state.destination_initialised = true;
             return true;
         }
@@ -599,10 +616,12 @@ private:
 
         const auto start = Clock::now();
         if (algorithm.operation == Operation::Compression) {
-            static_cast<void>(state.compressor->compress(selected_sources,
-                *state.destination,
-                std::span(state.destination_layers).first(state.batch_size),
-                algorithm.settings));
+            for (size_t layer = 0; layer < selected_sources.size(); ++layer)
+                state.scratch->upload(selected_sources[layer], unsigned(layer));
+            state.scratch->generate_mipmaps();
+            const auto result = algorithm.compressor->compress(
+                std::span(state.destination_layers).first(state.batch_size));
+            Q_ASSERT(result);
         }
 
         auto* functions = QOpenGLContext::currentContext()->extraFunctions();
@@ -684,10 +703,12 @@ private:
             selected_sources.reserve(active_batch_size);
             for (size_t layer = 0; layer < active_batch_size; ++layer)
                 selected_sources.push_back(m_sources[source_offset + layer]);
-            static_cast<void>(state.compressor->compress(selected_sources,
-                *state.destination,
-                std::span(state.destination_layers).first(active_batch_size),
-                algorithm.settings));
+            for (size_t layer = 0; layer < selected_sources.size(); ++layer)
+                state.scratch->upload(selected_sources[layer], unsigned(layer));
+            state.scratch->generate_mipmaps();
+            const auto result = algorithm.compressor->compress(
+                std::span(state.destination_layers).first(active_batch_size));
+            Q_ASSERT(result);
             for (unsigned layer = 0; layer < active_batch_size; ++layer) {
                 accumulate_quality(accumulator,
                     reconstruct(state, layer),

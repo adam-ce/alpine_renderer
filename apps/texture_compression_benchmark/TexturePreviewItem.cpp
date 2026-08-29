@@ -30,6 +30,7 @@
 #include <gl_engine/Framebuffer.h>
 #include <gl_engine/ShaderProgram.h>
 #include <gl_engine/Texture.h>
+#include <gl_engine/TextureCompressor.h>
 #include <gl_engine/helpers.h>
 #include <nucleus/tile/conversion.h>
 #include <nucleus/utils/ColourTexture.h>
@@ -115,53 +116,49 @@ QImage reconstruct(gl_engine::Texture& texture, unsigned resolution, unsigned la
 struct GpuPreview {
     const char* name;
     const char* description;
-    gl_engine::TextureCompressor::Encoder encoder;
-    unsigned effort;
+    gl_engine::TextureCompressor::Settings settings;
 };
 
-constexpr std::array<GpuPreview, 9> gpu_previews { {
-    { "Search 0",
+std::vector<GpuPreview> gpu_previews(nucleus::utils::ColourTexture::Format format)
+{
+    using Compressor = gl_engine::TextureCompressor;
+    const auto search = [](unsigned effort) {
+        return Compressor::Settings {
+            .dxt1_algorithm = Compressor::Dxt1Algorithm::SlowSearch,
+            .etc_algorithm = Compressor::EtcAlgorithm::SlowSearch,
+            .search_effort = effort,
+        };
+    };
+    std::vector<GpuPreview> result {
+        { "Slow search 0",
         "Tests the average block colour with every ETC1 modifier table and keeps the lowest-error result.",
-        gl_engine::TextureCompressor::Encoder::Search,
-        0 },
-    { "search 1",
+        search(0) },
+        { "Slow search 1",
         "Tests two base colours around the block average with every ETC1 modifier table and keeps the lowest-error result.",
-        gl_engine::TextureCompressor::Encoder::Search,
-        1 },
-    { "search 2",
+        search(1) },
+        { "Slow search 2",
         "Tests three base colours around the block average with every ETC1 modifier table and keeps the lowest-error result.",
-        gl_engine::TextureCompressor::Encoder::Search,
-        2 },
-    { "search 3",
+        search(2) },
+        { "Slow search 3",
         "Tests four base colours around the block average with every ETC1 modifier table and keeps the lowest-error result.",
-        gl_engine::TextureCompressor::Encoder::Search,
-        3 },
-    { "search 4",
+        search(3) },
+        { "Slow search 4",
         "Tests five base colours around the block average with every ETC1 modifier table and keeps the lowest-error result.",
-        gl_engine::TextureCompressor::Encoder::Search,
-        4 },
-    { "search 10",
+        search(4) },
+        { "Slow search 10",
         "Tests eleven base colours around the block average with every ETC1 modifier table and keeps the lowest-error result.",
-        gl_engine::TextureCompressor::Encoder::Search,
-        10 },
-    { "split fused exact",
-        "Evaluates all four colours in the selected modifier table for every pixel.",
-        gl_engine::TextureCompressor::Encoder::FastSplitFusedExact,
-        0 },
-    { "split exact residual fit",
-        "Refits each base from the average per-channel reconstruction residual and evaluates it once.",
-        gl_engine::TextureCompressor::Encoder::FastSplitFusedExactResidual,
-        0 },
-    { "split exact shared residual",
-        "Applies one combined per-channel residual correction to both bases of the winning split.",
-        gl_engine::TextureCompressor::Encoder::FastSplitFusedExactSharedResidual,
-        0 },
-} };
-
-constexpr size_t uncompressed_preview_index = 0;
-constexpr size_t goofy_preview_index = 1;
-constexpr size_t first_gpu_preview_index = 2;
-constexpr size_t preview_count = first_gpu_preview_index + gpu_previews.size();
+        search(10) },
+    };
+    if (format == nucleus::utils::ColourTexture::Format::ETC1) {
+        result.push_back({ "Fastest",
+            "Evaluates horizontal and vertical ETC splits with exact modifier selection.",
+            { .etc_algorithm = Compressor::EtcAlgorithm::Fastest } });
+        result.push_back({ "Fast",
+            "Refits each ETC base from its average reconstruction residual and evaluates it once.",
+            { .etc_algorithm = Compressor::EtcAlgorithm::Fast } });
+    }
+    return result;
+}
 } // namespace
 
 class TexturePreviewRenderer final : public QQuickFramebufferObject::Renderer {
@@ -209,9 +206,6 @@ private:
         constexpr unsigned resolution = 512;
         if (m_source_images.size() != tile_groups.size())
             return QStringLiteral("Preview imagery is incomplete.");
-        if (!gl_engine::TextureCompressor::is_supported())
-            return QStringLiteral("GPU compression is unavailable on this device.");
-
         std::vector<Raster> sources;
         sources.reserve(m_source_images.size());
         for (const auto& image : m_source_images)
@@ -221,14 +215,17 @@ private:
         std::iota(layers.begin(), layers.end(), 0u);
         const auto algorithm = gl_engine::Texture::compression_algorithm();
         const auto filter = gl_engine::Texture::Filter::MipMapLinear;
+        const auto mip_levels = gl_engine::TextureCompressor::mip_level_count(resolution, resolution);
+        const auto previews = gpu_previews(algorithm);
         m_preview_results.clear();
-        m_preview_results.reserve(preview_count);
+        m_preview_results.reserve(3 + previews.size());
+        m_preview_textures.clear();
+        m_preview_textures.reserve(3 + previews.size());
 
-        auto create_texture = [&](gl_engine::Texture::Format format) {
-            auto texture = std::make_unique<gl_engine::Texture>(gl_engine::Texture::Target::_2dArray, format);
-            texture->setParams(format == gl_engine::Texture::Format::CompressedRGBA8 ? filter : gl_engine::Texture::Filter::Linear,
-                gl_engine::Texture::Filter::Linear);
-            texture->allocate_array(resolution, resolution, unsigned(sources.size()));
+        auto create_texture = [&](gl_engine::Texture::Format format, gl_engine::Texture::Filter min_filter) {
+            auto texture = std::make_shared<gl_engine::Texture>(gl_engine::Texture::Target::_2dArray, format);
+            texture->setParams(min_filter, gl_engine::Texture::Filter::Linear);
+            texture->allocate_array(resolution, resolution, unsigned(sources.size()), mip_levels);
             return texture;
         };
         auto psnr = [&](gl_engine::Texture& texture) {
@@ -239,36 +236,44 @@ private:
             return linearPsnr(reconstructed, sources);
         };
 
-        m_preview_textures[uncompressed_preview_index] = create_texture(gl_engine::Texture::Format::SRGBA8);
+        auto scratch = create_texture(gl_engine::Texture::Format::RGBA8, gl_engine::Texture::Filter::Nearest);
         for (size_t layer = 0; layer < sources.size(); ++layer)
-            m_preview_textures[uncompressed_preview_index]->upload(sources[layer], unsigned(layer));
+            scratch->upload(sources[layer], unsigned(layer));
+        scratch->generate_mipmaps();
+
+        auto reference = create_texture(gl_engine::Texture::Format::SRGBA8, gl_engine::Texture::Filter::Linear);
+        for (size_t layer = 0; layer < sources.size(); ++layer)
+            reference->upload(sources[layer], unsigned(layer));
+        m_preview_textures.push_back(reference);
         m_preview_results.push_back({ QStringLiteral("Ref"),
             QStringLiteral("The original uncompressed texture array used as the visual and PSNR reference."),
             std::numeric_limits<double>::infinity() });
 
-        m_preview_textures[goofy_preview_index] = create_texture(gl_engine::Texture::Format::CompressedRGBA8);
+        auto copied = create_texture(gl_engine::Texture::Format::SRGBA8, filter);
+        gl_engine::TextureCompressor copy_compressor(scratch, copied);
+        if (const auto result = copy_compressor.compress(layers); !result)
+            return QString::fromStdString(result.error());
+        m_preview_textures.push_back(copied);
+        m_preview_results.push_back({ QStringLiteral("GPU copy"),
+            QStringLiteral("The RGBA8 scratch texture copied through the portable RGBA8 framebuffer path."),
+            psnr(*copied) });
+
+        auto goofy = create_texture(gl_engine::Texture::Format::CompressedRGBA8, filter);
         for (size_t layer = 0; layer < sources.size(); ++layer) {
             const auto compressed = nucleus::utils::generate_mipmapped_colour_texture(sources[layer], algorithm);
-            m_preview_textures[goofy_preview_index]->upload(compressed, unsigned(layer));
+            goofy->upload(compressed, unsigned(layer));
         }
+        m_preview_textures.push_back(goofy);
         m_preview_results.push_back({ QStringLiteral("Goofy"),
             QStringLiteral("CPU reference compressed by Goofy into the device's active ETC1 or DXT1 block format."),
-            psnr(*m_preview_textures[goofy_preview_index]) });
+            psnr(*goofy) });
 
-        for (size_t i = 0; i < gpu_previews.size(); ++i) {
-            const auto& preview = gpu_previews[i];
-            auto& texture = m_preview_textures[first_gpu_preview_index + i];
-            texture = create_texture(gl_engine::Texture::Format::CompressedRGBA8);
-            gl_engine::TextureCompressor compressor(resolution, resolution, unsigned(sources.size()));
-            static_cast<void>(compressor.compress(sources,
-                *texture,
-                layers,
-                {
-                    .algorithm = algorithm,
-                    .effort = preview.effort,
-                    .encoder = preview.encoder,
-                    .generate_mipmaps = true,
-                }));
+        for (const auto& preview : previews) {
+            auto texture = create_texture(gl_engine::Texture::Format::CompressedRGBA8, filter);
+            gl_engine::TextureCompressor compressor(scratch, texture, preview.settings);
+            if (const auto result = compressor.compress(layers); !result)
+                return QString::fromStdString(result.error());
+            m_preview_textures.push_back(texture);
             m_preview_results.push_back(
                 { QString::fromLatin1(preview.name), QString::fromLatin1(preview.description), psnr(*texture) });
         }
@@ -331,7 +336,7 @@ private:
     bool m_pending = false;
     std::vector<QImage> m_source_images;
     std::vector<TexturePreviewItem::PreviewResult> m_preview_results;
-    std::array<std::unique_ptr<gl_engine::Texture>, preview_count> m_preview_textures;
+    std::vector<std::shared_ptr<gl_engine::Texture>> m_preview_textures;
     std::unique_ptr<gl_engine::ShaderProgram> m_preview_shader;
     gl_engine::helpers::ScreenQuadGeometry m_preview_geometry;
 };

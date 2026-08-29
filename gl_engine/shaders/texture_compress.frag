@@ -1,3 +1,4 @@
+// GPU texture block encoder fragment shader.
 uniform highp sampler2DArray source_texture;
 uniform highp int texture_width;
 uniform highp int texture_height;
@@ -234,7 +235,7 @@ FastEtc1Evaluation evaluate_fast_split(highp uvec3 pixels[16],
             highp ivec3 reconstructed = clamp(base + ivec3(modifier(table, int(selected))), ivec3(0), ivec3(255));
             highp ivec3 delta = ivec3(pixel) - reconstructed;
             total_error += uint(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
-#if defined(ALP_COMPRESS_ETC1_REFINE_RESIDUAL) || defined(ALP_COMPRESS_ETC1_REFINE_SHARED_RESIDUAL)
+#ifdef ALP_COMPRESS_ETC1_REFINE_RESIDUAL
             if (second_subblock)
                 second_residual += delta;
             else
@@ -323,7 +324,7 @@ highp uvec2 encode_etc1_fast_split_fused(highp uvec3 pixels[16])
     highp uvec2 vertical = pack_fast_split(vertical_evaluation, left, right, vertical_bases, false);
     highp uvec2 horizontal = pack_fast_split(horizontal_evaluation, top, bottom, horizontal_bases, true);
 
-#if !defined(ALP_COMPRESS_ETC1_REFINE_RESIDUAL) && !defined(ALP_COMPRESS_ETC1_REFINE_SHARED_RESIDUAL)
+#ifndef ALP_COMPRESS_ETC1_REFINE_RESIDUAL
     return horizontal_evaluation.error < vertical_evaluation.error ? horizontal : vertical;
 #else
     bool horizontal_wins = horizontal_evaluation.error < vertical_evaluation.error;
@@ -339,18 +340,10 @@ highp uvec2 encode_etc1_fast_split_fused(highp uvec3 pixels[16])
         best_evaluation = horizontal_evaluation;
         best_block = horizontal;
     }
-#ifdef ALP_COMPRESS_ETC1_REFINE_SHARED_RESIDUAL
-    highp ivec3 combined_residual = best_evaluation.first_residual + best_evaluation.second_residual;
-    FastEtc1Subblock candidate_first
-        = refit_fast_subblock(first, best_bases.first_decoded, combined_residual, 16);
-    FastEtc1Subblock candidate_second
-        = refit_fast_subblock(second, best_bases.second_decoded, combined_residual, 16);
-#else
     FastEtc1Subblock candidate_first
         = refit_fast_subblock(first, best_bases.first_decoded, best_evaluation.first_residual, 8);
     FastEtc1Subblock candidate_second
         = refit_fast_subblock(second, best_bases.second_decoded, best_evaluation.second_residual, 8);
-#endif
     FastEtc1Bases candidate_bases = fast_split_bases(candidate_first, candidate_second);
     FastEtc1Evaluation candidate_evaluation
         = evaluate_fast_split(pixels, candidate_first, candidate_second, candidate_bases, horizontal_wins);

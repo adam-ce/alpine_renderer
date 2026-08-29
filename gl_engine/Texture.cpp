@@ -17,7 +17,6 @@
  *****************************************************************************/
 
 #include "Texture.h"
-#include "ShaderProgram.h"
 #include "nucleus/utils/ColourTexture.h"
 
 #include <QDebug>
@@ -52,6 +51,8 @@ GlParams gl_tex_params(gl_engine::Texture::Format format)
         return { GLint(gl_engine::Texture::compressed_texture_format()), 0, 0, 0, 0, true };
     case F::RGBA8:
         return { GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, 4, 1, true };
+    case F::RGB565:
+        return { GL_RGB565, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, 1, 2, true };
     case F::SRGBA8:
         return { GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, 4, 1, true };
     case F::RGBA8UI:
@@ -118,22 +119,37 @@ void gl_engine::Texture::setParams(Filter min_filter, Filter mag_filter, bool an
         f->glTexParameterf(GLenum(m_target), max_anisotropy_param(), max_anisotropy());
 }
 
-void gl_engine::Texture::allocate_array(unsigned int width, unsigned int height, unsigned int n_layers)
+void gl_engine::Texture::allocate_array(unsigned int width, unsigned int height, unsigned int n_layers, unsigned mip_levels)
 {
     Q_ASSERT(m_target == Target::_2dArray);
     Q_ASSERT(m_format != Format::Invalid);
 
-    auto mip_level_count = 1;
-    if (m_min_filter == Filter::MipMapLinear)
-        mip_level_count = GLsizei(1 + std::floor(std::log2(std::max(width, height))));
+    auto mip_level_count = GLsizei(mip_levels);
+    if (mip_level_count == 0) {
+        mip_level_count = 1;
+        if (m_min_filter == Filter::MipMapLinear)
+            mip_level_count = GLsizei(1 + std::floor(std::log2(std::max(width, height))));
+    }
 
     m_width = width;
     m_height = height;
     m_n_layers = n_layers;
+    m_mip_levels = unsigned(mip_level_count);
 
     auto* f = QOpenGLContext::currentContext()->extraFunctions();
     f->glBindTexture(GLenum(m_target), m_id);
     f->glTexStorage3D(GLenum(m_target), mip_level_count, gl_tex_params(m_format).internal_format, GLsizei(width), GLsizei(height), GLsizei(n_layers));
+}
+
+void gl_engine::Texture::generate_mipmaps()
+{
+    Q_ASSERT(m_target == Target::_2dArray);
+    Q_ASSERT(m_mip_levels > 1);
+    Q_ASSERT(m_format != Format::CompressedRGBA8);
+    Q_ASSERT(gl_tex_params(m_format).is_texture_filterable);
+    auto* f = QOpenGLContext::currentContext()->extraFunctions();
+    f->glBindTexture(GLenum(m_target), m_id);
+    f->glGenerateMipmap(GLenum(m_target));
 }
 
 void gl_engine::Texture::upload(const nucleus::utils::ColourTexture& texture)
@@ -380,465 +396,4 @@ float gl_engine::Texture::max_anisotropy()
     }();
     return max_anisotropy;
 #endif
-}
-
-struct gl_engine::TextureCompressor::Impl {
-    static constexpr unsigned max_shader_mip_levels = 16;
-
-    unsigned width = 0;
-    unsigned height = 0;
-    unsigned max_batch_size = 0;
-    unsigned scratch_layers = 0;
-    GLsizei block_atlas_width = 0;
-    GLsizei block_atlas_height = 0;
-    GLsizei paired_atlas_width = 0;
-    GLsizei paired_atlas_height = 0;
-    GLuint scratch_texture = 0;
-    GLuint encoded_texture = 0;
-    GLuint paired_encoded_texture = 0;
-    GLuint encoded_buffer = 0;
-    GLuint vertex_array = 0;
-    GLuint encoding_framebuffer = 0;
-    GLuint paired_encoding_framebuffer = 0;
-    ReadbackMode readback_mode = ReadbackMode::RG32UI;
-    std::unique_ptr<ShaderProgram> dxt1_fragment_program;
-    std::unique_ptr<ShaderProgram> etc1_fragment_program;
-    std::unique_ptr<ShaderProgram> etc1_fast_split_fused_exact_fragment_program;
-    std::unique_ptr<ShaderProgram> etc1_fast_split_fused_exact_residual_fragment_program;
-    std::unique_ptr<ShaderProgram> etc1_fast_split_fused_exact_shared_residual_fragment_program;
-    std::unique_ptr<ShaderProgram> checksum_fragment_program;
-    std::unique_ptr<ShaderProgram> paired_dxt1_fragment_program;
-    std::unique_ptr<ShaderProgram> paired_etc1_fragment_program;
-    std::unique_ptr<ShaderProgram> paired_etc1_fast_split_fused_exact_fragment_program;
-    std::unique_ptr<ShaderProgram> paired_etc1_fast_split_fused_exact_residual_fragment_program;
-    std::unique_ptr<ShaderProgram> paired_etc1_fast_split_fused_exact_shared_residual_fragment_program;
-    std::unique_ptr<ShaderProgram> paired_checksum_fragment_program;
-
-    Impl(unsigned texture_width, unsigned texture_height, unsigned maximum_batch_size)
-        : width(texture_width)
-        , height(texture_height)
-        , max_batch_size(maximum_batch_size)
-    {
-        Q_ASSERT(width > 0 && height > 0 && max_batch_size > 0);
-        Q_ASSERT(TextureCompressor::mip_level_count(width, height) <= max_shader_mip_levels);
-        auto* f = QOpenGLContext::currentContext()->extraFunctions();
-        size_t maximum_size = 0;
-        for (unsigned level = 0; level < TextureCompressor::mip_level_count(width, height); ++level) {
-            maximum_size += TextureCompressor::compressed_level_size(
-                std::max(1u, width >> level), std::max(1u, height >> level));
-        }
-        maximum_size *= max_batch_size;
-
-        GLint maximum_texture_size = 0;
-        f->glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum_texture_size);
-        const auto atlas_size = [](size_t pixels, GLint maximum_dimension) {
-            const auto atlas_width = GLsizei(std::min({ pixels, size_t(maximum_dimension), size_t(256) }));
-            const auto atlas_height = GLsizei((pixels + size_t(atlas_width) - 1) / size_t(atlas_width));
-            Q_ASSERT(atlas_width > 0 && atlas_height > 0 && atlas_height <= maximum_dimension);
-            return std::pair(atlas_width, atlas_height);
-        };
-        std::tie(block_atlas_width, block_atlas_height) = atlas_size(maximum_size / 8, maximum_texture_size);
-        std::tie(paired_atlas_width, paired_atlas_height)
-            = atlas_size((maximum_size + 15) / 16, maximum_texture_size);
-
-        f->glGenBuffers(1, &encoded_buffer);
-        f->glBindBuffer(GL_PIXEL_PACK_BUFFER, encoded_buffer);
-        const auto encoded_buffer_size = std::max({
-            size_t(block_atlas_width) * size_t(block_atlas_height) * 8,
-            size_t(paired_atlas_width) * size_t(paired_atlas_height) * 16,
-        });
-        f->glBufferData(GL_PIXEL_PACK_BUFFER,
-            GLsizeiptr(encoded_buffer_size),
-            nullptr,
-            GL_STREAM_DRAW);
-        f->glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-        f->glGenVertexArrays(1, &vertex_array);
-
-        GLint previous_draw_framebuffer = 0;
-        GLint previous_read_framebuffer = 0;
-        GLint previous_texture = 0;
-        f->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_framebuffer);
-        f->glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_framebuffer);
-        f->glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
-
-        f->glGenTextures(1, &encoded_texture);
-        f->glBindTexture(GL_TEXTURE_2D, encoded_texture);
-        f->glTexStorage2D(GL_TEXTURE_2D, 1, GL_RG32UI, block_atlas_width, block_atlas_height);
-        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        f->glGenFramebuffers(1, &encoding_framebuffer);
-        f->glBindFramebuffer(GL_FRAMEBUFFER, encoding_framebuffer);
-        f->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, encoded_texture, 0);
-        const auto encoding_framebuffer_status = f->glCheckFramebufferStatus(GL_FRAMEBUFFER);
-        GLint implementation_read_format = 0;
-        GLint implementation_read_type = 0;
-        if (encoding_framebuffer_status == GL_FRAMEBUFFER_COMPLETE) {
-            f->glReadBuffer(GL_COLOR_ATTACHMENT0);
-            f->glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_FORMAT, &implementation_read_format);
-            f->glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_TYPE, &implementation_read_type);
-        }
-        if (encoding_framebuffer_status != GL_FRAMEBUFFER_COMPLETE
-            || implementation_read_format != GL_RG_INTEGER
-            || implementation_read_type != GL_UNSIGNED_INT) {
-            readback_mode = ReadbackMode::RGBA32UI;
-            qInfo().noquote()
-                << QStringLiteral("RG32UI readback is unavailable (framebuffer 0x%1, format 0x%2, type 0x%3); falling back to paired RGBA32UI readback.")
-                       .arg(unsigned(encoding_framebuffer_status), 0, 16)
-                       .arg(unsigned(implementation_read_format), 0, 16)
-                       .arg(unsigned(implementation_read_type), 0, 16);
-
-            f->glGenTextures(1, &paired_encoded_texture);
-            f->glBindTexture(GL_TEXTURE_2D, paired_encoded_texture);
-            f->glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32UI, paired_atlas_width, paired_atlas_height);
-            f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-            f->glGenFramebuffers(1, &paired_encoding_framebuffer);
-            f->glBindFramebuffer(GL_FRAMEBUFFER, paired_encoding_framebuffer);
-            f->glFramebufferTexture2D(
-                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, paired_encoded_texture, 0);
-            if (f->glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-                qFatal("Paired RGBA32UI texture compression framebuffer is incomplete");
-        }
-        f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(previous_draw_framebuffer));
-        f->glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(previous_read_framebuffer));
-        f->glBindTexture(GL_TEXTURE_2D, GLuint(previous_texture));
-
-    }
-
-    ShaderProgram* paired_program(Encoder encoder, nucleus::utils::ColourTexture::Format algorithm)
-    {
-        auto* program = &paired_dxt1_fragment_program;
-        std::vector<QString> defines { QStringLiteral("#define ALP_COMPRESS_TWO_BLOCKS") };
-        if (encoder == Encoder::Checksum) {
-            program = &paired_checksum_fragment_program;
-            defines.push_back(QStringLiteral("#define ALP_COMPRESS_CHECKSUM"));
-        } else if (algorithm == nucleus::utils::ColourTexture::Format::ETC1) {
-            program = &paired_etc1_fragment_program;
-            defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1"));
-            if (encoder == Encoder::FastSplitFusedExact) {
-                program = &paired_etc1_fast_split_fused_exact_fragment_program;
-                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"));
-            } else if (encoder == Encoder::FastSplitFusedExactResidual) {
-                program = &paired_etc1_fast_split_fused_exact_residual_fragment_program;
-                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"));
-                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_REFINE_RESIDUAL"));
-            } else if (encoder == Encoder::FastSplitFusedExactSharedResidual) {
-                program = &paired_etc1_fast_split_fused_exact_shared_residual_fragment_program;
-                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"));
-                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_REFINE_SHARED_RESIDUAL"));
-            }
-        }
-        if (!*program) {
-            *program = std::make_unique<ShaderProgram>(
-                "texture_compress_raster.vert", "texture_compress.vert", ShaderCodeSource::FILE, defines);
-        }
-        return program->get();
-    }
-
-    ShaderProgram* single_program(Encoder encoder, nucleus::utils::ColourTexture::Format algorithm)
-    {
-        auto* program = &dxt1_fragment_program;
-        std::vector<QString> defines;
-        if (encoder == Encoder::Checksum) {
-            program = &checksum_fragment_program;
-            defines.push_back(QStringLiteral("#define ALP_COMPRESS_CHECKSUM"));
-        } else if (algorithm == nucleus::utils::ColourTexture::Format::ETC1) {
-            program = &etc1_fragment_program;
-            defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1"));
-            if (encoder == Encoder::FastSplitFusedExact) {
-                program = &etc1_fast_split_fused_exact_fragment_program;
-                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"));
-            } else if (encoder == Encoder::FastSplitFusedExactResidual) {
-                program = &etc1_fast_split_fused_exact_residual_fragment_program;
-                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"));
-                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_REFINE_RESIDUAL"));
-            } else if (encoder == Encoder::FastSplitFusedExactSharedResidual) {
-                program = &etc1_fast_split_fused_exact_shared_residual_fragment_program;
-                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_SPLIT_FUSED"));
-                defines.push_back(QStringLiteral("#define ALP_COMPRESS_ETC1_REFINE_SHARED_RESIDUAL"));
-            }
-        }
-        if (!*program) {
-            *program = std::make_unique<ShaderProgram>(
-                "texture_compress_raster.vert", "texture_compress.vert", ShaderCodeSource::FILE, defines);
-        }
-        return program->get();
-    }
-
-    ~Impl()
-    {
-        dxt1_fragment_program.reset();
-        etc1_fragment_program.reset();
-        etc1_fast_split_fused_exact_fragment_program.reset();
-        etc1_fast_split_fused_exact_residual_fragment_program.reset();
-        etc1_fast_split_fused_exact_shared_residual_fragment_program.reset();
-        checksum_fragment_program.reset();
-        paired_dxt1_fragment_program.reset();
-        paired_etc1_fragment_program.reset();
-        paired_etc1_fast_split_fused_exact_fragment_program.reset();
-        paired_etc1_fast_split_fused_exact_residual_fragment_program.reset();
-        paired_etc1_fast_split_fused_exact_shared_residual_fragment_program.reset();
-        paired_checksum_fragment_program.reset();
-        if (!QOpenGLContext::currentContext())
-            return;
-        auto* f = QOpenGLContext::currentContext()->extraFunctions();
-        f->glDeleteFramebuffers(1, &encoding_framebuffer);
-        f->glDeleteFramebuffers(1, &paired_encoding_framebuffer);
-        f->glDeleteTextures(1, &encoded_texture);
-        f->glDeleteTextures(1, &paired_encoded_texture);
-        f->glDeleteVertexArrays(1, &vertex_array);
-        f->glDeleteBuffers(1, &encoded_buffer);
-        if (scratch_texture)
-            f->glDeleteTextures(1, &scratch_texture);
-    }
-
-    void ensure_scratch_storage(unsigned layers)
-    {
-        if (scratch_layers == layers)
-            return;
-        auto* f = QOpenGLContext::currentContext()->extraFunctions();
-        if (scratch_texture)
-            f->glDeleteTextures(1, &scratch_texture);
-        f->glGenTextures(1, &scratch_texture);
-        f->glBindTexture(GL_TEXTURE_2D_ARRAY, scratch_texture);
-        f->glTexStorage3D(GL_TEXTURE_2D_ARRAY,
-            GLsizei(TextureCompressor::mip_level_count(width, height)),
-            GL_RGBA8,
-            GLsizei(width),
-            GLsizei(height),
-            GLsizei(layers));
-        f->glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
-        f->glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        f->glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        f->glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        scratch_layers = layers;
-    }
-};
-
-gl_engine::TextureCompressor::TextureCompressor(unsigned width, unsigned height, unsigned max_batch_size)
-    : m(std::make_unique<Impl>(width, height, max_batch_size))
-{
-}
-
-gl_engine::TextureCompressor::~TextureCompressor() = default;
-
-gl_engine::TextureCompressor::ReadbackMode gl_engine::TextureCompressor::readback_mode() const
-{
-    return m->readback_mode;
-}
-
-size_t gl_engine::TextureCompressor::compressed_level_size(unsigned width, unsigned height)
-{
-    return size_t(std::max(1u, (width + 3) / 4)) * std::max(1u, (height + 3) / 4) * 8;
-}
-
-unsigned gl_engine::TextureCompressor::mip_level_count(unsigned width, unsigned height)
-{
-    Q_ASSERT(width > 0 && height > 0);
-    return 1u + unsigned(std::floor(std::log2(std::max(width, height))));
-}
-
-bool gl_engine::TextureCompressor::is_supported()
-{
-#if defined(__EMSCRIPTEN__)
-    const auto context = emscripten_webgl_get_current_context();
-    if (!context)
-        return false;
-    if (emscripten_webgl_enable_extension(context, "WEBGL_compressed_texture_etc"))
-        return true;
-    return emscripten_webgl_enable_extension(context, "WEBGL_compressed_texture_s3tc")
-        && emscripten_webgl_enable_extension(context, "WEBGL_compressed_texture_s3tc_srgb");
-#else
-    return true;
-#endif
-}
-
-gl_engine::TextureCompressor::Result gl_engine::TextureCompressor::compress(std::span<const radix::Raster<glm::u8vec4>> textures,
-    Texture& destination,
-    std::span<const unsigned> destination_layers,
-    const Settings& settings)
-{
-    Q_ASSERT(is_supported());
-    Q_ASSERT(!textures.empty());
-    Q_ASSERT(textures.size() == destination_layers.size());
-    Q_ASSERT(textures.size() <= m->max_batch_size);
-    Q_ASSERT(destination.m_target == Texture::Target::_2dArray);
-    Q_ASSERT(destination.m_format == Texture::Format::CompressedRGBA8);
-    Q_ASSERT(destination.m_width == m->width && destination.m_height == m->height);
-    Q_ASSERT(settings.algorithm == Texture::compression_algorithm());
-    Q_ASSERT(settings.effort <= 10);
-    for (size_t i = 0; i < textures.size(); ++i) {
-        Q_ASSERT(unsigned(textures[i].width()) == m->width && unsigned(textures[i].height()) == m->height);
-        Q_ASSERT(destination_layers[i] < destination.m_n_layers);
-    }
-
-    m->ensure_scratch_storage(unsigned(textures.size()));
-    auto* f = QOpenGLContext::currentContext()->extraFunctions();
-    Result result;
-    result.mip_levels = settings.generate_mipmaps ? mip_level_count(m->width, m->height) : 1;
-
-    {
-        f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
-        f->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        for (size_t layer = 0; layer < textures.size(); ++layer) {
-            f->glTexSubImage3D(GL_TEXTURE_2D_ARRAY,
-                0,
-                0,
-                0,
-                GLint(layer),
-                GLsizei(m->width),
-                GLsizei(m->height),
-                1,
-                GL_RGBA,
-                GL_UNSIGNED_BYTE,
-                textures[layer].bytes().data());
-        }
-    }
-    if (settings.generate_mipmaps) {
-        f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
-        f->glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
-    }
-
-    std::vector<size_t> level_offsets;
-    std::vector<int> level_offsets_blocks;
-    std::vector<int> level_blocks_x;
-    std::vector<int> level_blocks_y;
-    level_offsets.reserve(result.mip_levels);
-    level_offsets_blocks.reserve(result.mip_levels);
-    level_blocks_x.reserve(result.mip_levels);
-    level_blocks_y.reserve(result.mip_levels);
-    size_t total_encoded_size = 0;
-    for (unsigned level = 0; level < result.mip_levels; ++level) {
-        level_offsets.push_back(total_encoded_size);
-        const auto level_width = std::max(1u, m->width >> level);
-        const auto level_height = std::max(1u, m->height >> level);
-        level_offsets_blocks.push_back(int(total_encoded_size / 8));
-        level_blocks_x.push_back(int(std::max(1u, (level_width + 3) / 4)));
-        level_blocks_y.push_back(int(std::max(1u, (level_height + 3) / 4)));
-        total_encoded_size += compressed_level_size(level_width, level_height) * textures.size();
-    }
-    result.encoded_bytes = total_encoded_size;
-
-    GLint previous_draw_framebuffer = 0;
-    GLint previous_viewport[4] = {};
-    GLboolean previous_colour_mask[4] = {};
-    GLboolean blend_enabled = GL_FALSE;
-    GLboolean cull_enabled = GL_FALSE;
-    GLboolean depth_enabled = GL_FALSE;
-    GLboolean scissor_enabled = GL_FALSE;
-    const auto paired_blocks = m->readback_mode == ReadbackMode::RGBA32UI;
-    const auto total_blocks = total_encoded_size / 8;
-    const auto encoding_pixels = paired_blocks ? (total_blocks + 1) / 2 : total_blocks;
-    const auto maximum_encoding_width = paired_blocks ? m->paired_atlas_width : m->block_atlas_width;
-    const auto encoding_width = GLsizei(std::min(encoding_pixels, size_t(maximum_encoding_width)));
-    const auto encoding_height = GLsizei((encoding_pixels + size_t(encoding_width) - 1) / size_t(encoding_width));
-
-    {
-        auto* program = paired_blocks ? m->paired_program(settings.encoder, settings.algorithm)
-                                      : m->single_program(settings.encoder, settings.algorithm);
-        f->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw_framebuffer);
-        f->glGetIntegerv(GL_VIEWPORT, previous_viewport);
-        f->glGetBooleanv(GL_COLOR_WRITEMASK, previous_colour_mask);
-        blend_enabled = f->glIsEnabled(GL_BLEND);
-        cull_enabled = f->glIsEnabled(GL_CULL_FACE);
-        depth_enabled = f->glIsEnabled(GL_DEPTH_TEST);
-        scissor_enabled = f->glIsEnabled(GL_SCISSOR_TEST);
-
-        f->glDisable(GL_BLEND);
-        f->glDisable(GL_CULL_FACE);
-        f->glDisable(GL_DEPTH_TEST);
-        f->glDisable(GL_SCISSOR_TEST);
-        f->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-
-        f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER,
-            paired_blocks ? m->paired_encoding_framebuffer : m->encoding_framebuffer);
-        f->glViewport(0, 0, encoding_width, encoding_height);
-        program->bind();
-        program->set_uniform("source_texture", 7);
-        program->set_uniform("texture_width", int(m->width));
-        program->set_uniform("texture_height", int(m->height));
-        program->set_uniform("effort", int(settings.effort));
-        program->set_uniform("atlas_width", int(encoding_width));
-        program->set_uniform("total_blocks", int(total_blocks));
-        program->set_uniform("mip_levels", int(result.mip_levels));
-        program->set_uniform_array("level_offsets", level_offsets_blocks);
-        program->set_uniform_array("level_blocks_x", level_blocks_x);
-        program->set_uniform_array("level_blocks_y", level_blocks_y);
-        f->glActiveTexture(GL_TEXTURE7);
-        f->glBindTexture(GL_TEXTURE_2D_ARRAY, m->scratch_texture);
-        f->glBindVertexArray(m->vertex_array);
-        f->glDrawArrays(GL_TRIANGLES, 0, 3);
-        program->release();
-    }
-
-    GLsizei readback_width = encoding_width;
-    GLsizei readback_height = encoding_height;
-    GLuint readback_framebuffer = paired_blocks ? m->paired_encoding_framebuffer : m->encoding_framebuffer;
-    GLenum readback_format = paired_blocks ? GL_RGBA_INTEGER : GL_RG_INTEGER;
-
-    f->glBindVertexArray(0);
-    if (blend_enabled)
-        f->glEnable(GL_BLEND);
-    if (cull_enabled)
-        f->glEnable(GL_CULL_FACE);
-    if (depth_enabled)
-        f->glEnable(GL_DEPTH_TEST);
-    if (scissor_enabled)
-        f->glEnable(GL_SCISSOR_TEST);
-    f->glColorMask(previous_colour_mask[0], previous_colour_mask[1], previous_colour_mask[2], previous_colour_mask[3]);
-    f->glViewport(previous_viewport[0], previous_viewport[1], previous_viewport[2], previous_viewport[3]);
-    f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(previous_draw_framebuffer));
-
-    {
-        GLint previous_read_framebuffer = 0;
-        GLint previous_read_buffer = 0;
-        GLint previous_pack_alignment = 0;
-        f->glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_framebuffer);
-        f->glGetIntegerv(GL_READ_BUFFER, &previous_read_buffer);
-        f->glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack_alignment);
-        f->glBindFramebuffer(GL_READ_FRAMEBUFFER, readback_framebuffer);
-        f->glReadBuffer(GL_COLOR_ATTACHMENT0);
-        f->glPixelStorei(GL_PACK_ALIGNMENT, 1);
-        f->glBindBuffer(GL_PIXEL_PACK_BUFFER, m->encoded_buffer);
-        f->glReadPixels(
-            0, 0, readback_width, readback_height, readback_format, GL_UNSIGNED_INT, nullptr);
-        f->glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-        f->glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
-        f->glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(previous_read_framebuffer));
-        f->glReadBuffer(GLenum(previous_read_buffer));
-    }
-
-    {
-        f->glBindTexture(GL_TEXTURE_2D_ARRAY, destination.m_id);
-        f->glBindBuffer(GL_PIXEL_UNPACK_BUFFER, m->encoded_buffer);
-        const auto format = Texture::compressed_texture_format();
-        for (unsigned level = 0; level < result.mip_levels; ++level) {
-            const auto level_width = std::max(1u, m->width >> level);
-            const auto level_height = std::max(1u, m->height >> level);
-            const auto layer_size = compressed_level_size(level_width, level_height);
-            for (size_t layer = 0; layer < textures.size(); ++layer) {
-                const auto offset = level_offsets[level] + layer_size * layer;
-                f->glCompressedTexSubImage3D(GL_TEXTURE_2D_ARRAY,
-                    GLint(level),
-                    0,
-                    0,
-                    GLint(destination_layers[layer]),
-                    GLsizei(level_width),
-                    GLsizei(level_height),
-                    1,
-                    format,
-                    GLsizei(layer_size),
-                    reinterpret_cast<const void*>(quintptr(offset)));
-            }
-        }
-        f->glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-    }
-    f->glActiveTexture(GL_TEXTURE0);
-    return result;
 }
