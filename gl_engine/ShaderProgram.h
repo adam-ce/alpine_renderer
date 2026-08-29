@@ -84,10 +84,7 @@ private:
     static void preprocess_shader_content_inplace(QString& base);
 
 public:
-    ShaderProgram(QString vertex_shader,
-        QString fragment_shader,
-        ShaderCodeSource code_source = ShaderCodeSource::FILE,
-        const std::vector<QString>& defines = {});
+    ShaderProgram(QString vertex_shader, QString fragment_shader, ShaderCodeSource code_source = ShaderCodeSource::FILE, const std::vector<QString>& defines = {});
 
     int attribute_location(const std::string& name);
     void bind();

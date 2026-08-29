@@ -177,10 +177,7 @@ QString ShaderProgram::read_file_content_local(const QString& name) {
 
 // =========== MEMBER DECLARATIONS =======================
 
-ShaderProgram::ShaderProgram(QString vertex_shader,
-    QString fragment_shader,
-    ShaderCodeSource code_source,
-    const std::vector<QString>& defines)
+ShaderProgram::ShaderProgram(QString vertex_shader, QString fragment_shader, ShaderCodeSource code_source, const std::vector<QString>& defines)
     : m_vertex_shader(vertex_shader)
     , m_fragment_shader(fragment_shader)
     , m_code_source(code_source)
@@ -249,10 +246,7 @@ void ShaderProgram::set_uniform(const std::string& name, int value)
 
 void ShaderProgram::set_uniform(const std::string& name, unsigned value)
 {
-    if (!m_cached_uniforms.contains(name))
-        m_cached_uniforms[name] = m_q_shader_program->uniformLocation(name.c_str());
-
-    QOpenGLContext::currentContext()->extraFunctions()->glUniform1ui(m_cached_uniforms.at(name), value);
+    set_uniform_template(name, value);
 }
 
 void ShaderProgram::set_uniform(const std::string& name, float value)
@@ -284,7 +278,8 @@ void ShaderProgram::set_uniform_array(const std::string& name, const std::vector
     if (!m_cached_uniforms.contains(name))
         m_cached_uniforms[name] = m_q_shader_program->uniformLocation(name.c_str());
 
-    QOpenGLContext::currentContext()->extraFunctions()->glUniform1iv(m_cached_uniforms.at(name), GLsizei(array.size()), array.data());
+    const auto uniform_location = m_cached_uniforms.at(name);
+    m_q_shader_program->setUniformValueArray(uniform_location, array.data(), int(array.size()));
 }
 
 // Helper function because i get frustrated with the shader compile errors...
@@ -334,22 +329,21 @@ void ShaderProgram::reload()
         outputMeaningfullErrors(program->log(), vertexCode, m_vertex_shader);
     } else if (!program->addShaderFromSourceCode(QOpenGLShader::Fragment, fragmentCode)) {
         outputMeaningfullErrors(program->log(), fragmentCode, m_fragment_shader);
-    } else {
-        if (!program->link()) {
+    } else if (!program->link()) {
 #ifdef _MSC_VER
-            // when using msvc in github ci qDebug/Critical don't print when an assert fails
-            // effectively, we don't see any error
-            std::cerr << "error linking shader " << m_vertex_shader.toStdString() << "and" << m_fragment_shader.toStdString() << std::endl;
-            fflush(stderr);
-            fflush(stdout);
+        // when using msvc in github ci qDebug/Critical don't print when an assert fails
+        // effectively, we don't see any error
+        std::cerr << "error linking shader " << m_vertex_shader.toStdString() << "and" << m_fragment_shader.toStdString() << std::endl;
+        fflush(stderr);
+        fflush(stdout);
 #else
-            qCritical() << "error linking shader " << m_vertex_shader.toStdString() << "and" << m_fragment_shader.toStdString();
+        qCritical() << "error linking shader " << m_vertex_shader.toStdString() << "and" << m_fragment_shader.toStdString();
 #endif
-        } else {
-            m_q_shader_program = std::move(program);
-            m_cached_attribs.clear();
-            m_cached_uniforms.clear();
-        }
+    } else {
+        // NO ERROR
+        m_q_shader_program = std::move(program);
+        m_cached_attribs.clear();
+        m_cached_uniforms.clear();
     }
 }
 
