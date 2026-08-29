@@ -37,7 +37,6 @@ private:
 
 public:
     explicit ColourTexture(const radix::Raster<glm::u8vec4>& data, Format format);
-    ColourTexture(std::vector<uint8_t> data, unsigned width, unsigned height, Format format);
     [[nodiscard]] const uint8_t* data() const { return m_data.data(); }
     [[nodiscard]] size_t n_bytes() const { return m_data.size(); }
     [[nodiscard]] unsigned width() const { return m_width; }

@@ -29,6 +29,8 @@ if(ALP_ENABLE_LABELS)
 endif()
 alp_add_git_repository(goofy_tc URL https://github.com/AlpineMapsOrgDependencies/Goofy_slim.git COMMITISH 13b228784960a6227bb6ca704ff34161bbac1b91 DO_NOT_ADD_SUBPROJECT)
 alp_add_git_repository(cdt URL https://github.com/artem-ogre/CDT.git COMMITISH 46f1ce1f495a97617d90e8c833d0d29406335fdf DO_NOT_ADD_SUBPROJECT)
+include(${CMAKE_SOURCE_DIR}/cmake/SetupKTX.cmake)
+alp_setup_ktx(952d74f1d53452e4e976a2b7698ff7af6c13a9ed)
 
 add_library(zppbits INTERFACE)
 target_include_directories(zppbits SYSTEM INTERFACE ${zppbits_SOURCE_DIR})
@@ -113,6 +115,7 @@ qt_add_library(nucleus STATIC
     tile/setup.h
     tile/GpuArrayHelper.h tile/GpuArrayHelper.cpp
     tile/TextureScheduler.h tile/TextureScheduler.cpp
+    tile/Texture3DScheduler.h tile/Texture3DScheduler.cpp
     tile/GeometryScheduler.h tile/GeometryScheduler.cpp
     utils/easing.h
     utils/error.h
@@ -122,13 +125,6 @@ qt_add_library(nucleus STATIC
     tile/drawing.h tile/drawing.cpp
     camera/gesture.h
 )
-
-if (ALP_BUILD_WEBGPU_ENGINE)
-    include(${CMAKE_SOURCE_DIR}/cmake/SetupKTX.cmake)
-    alp_setup_ktx(952d74f1d53452e4e976a2b7698ff7af6c13a9ed)
-    target_sources(nucleus PRIVATE tile/Texture3DScheduler.h tile/Texture3DScheduler.cpp)
-    target_link_libraries(nucleus PUBLIC KTX::ktx)
-endif()
 
 if (ALP_ENABLE_AVALANCHE_WARNING_LAYER)
     target_sources(nucleus
@@ -181,7 +177,7 @@ endif()
 
 target_include_directories(nucleus PUBLIC ${CMAKE_SOURCE_DIR})
 # Please keep Qt::Gui outside the nucleus. If you need it optional via a cmake based switch
-target_link_libraries(nucleus PUBLIC radix Qt::Core Qt::Network zppbits nucleus_version stb_slim goofy_tc cdt)
+target_link_libraries(nucleus PUBLIC radix Qt::Core Qt::Network zppbits nucleus_version stb_slim goofy_tc cdt KTX::ktx)
 
 qt_add_resources(nucleus "height_data"
     PREFIX "/map"

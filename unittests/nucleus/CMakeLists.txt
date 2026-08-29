@@ -90,7 +90,6 @@ if (ALP_ENABLE_AVALANCHE_WARNING_LAYER)
         data/eaws_7-67-45.mvt
     )
 endif()
-
 target_link_libraries(unittests_nucleus PUBLIC nucleus Catch2::Catch2 Qt::Test Qt::Gui)
 target_compile_definitions(unittests_nucleus PUBLIC "ALP_TEST_DATA_DIR=\":/test_data/\"")
 
