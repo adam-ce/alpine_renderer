@@ -123,6 +123,12 @@ void gl_engine::Texture::allocate_array(unsigned int width, unsigned int height,
 {
     Q_ASSERT(m_target == Target::_2dArray);
     Q_ASSERT(m_format != Format::Invalid);
+    Q_ASSERT(width > 0);
+    Q_ASSERT(height > 0);
+    Q_ASSERT(n_layers > 0);
+
+    const auto maximum_mip_levels = 1u + unsigned(std::floor(std::log2((std::max)(width, height))));
+    Q_ASSERT(mip_levels <= maximum_mip_levels);
 
     auto mip_level_count = GLsizei(mip_levels);
     if (mip_level_count == 0) {

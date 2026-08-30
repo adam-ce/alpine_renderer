@@ -621,7 +621,8 @@ private:
             state.scratch->generate_mipmaps();
             const auto result = algorithm.compressor->compress(
                 std::span(state.destination_layers).first(state.batch_size));
-            Q_ASSERT(result);
+            if (!result)
+                qFatal("Texture compression failed: %s", result.error().c_str());
         }
 
         auto* functions = QOpenGLContext::currentContext()->extraFunctions();
@@ -708,7 +709,8 @@ private:
             state.scratch->generate_mipmaps();
             const auto result = algorithm.compressor->compress(
                 std::span(state.destination_layers).first(active_batch_size));
-            Q_ASSERT(result);
+            if (!result)
+                qFatal("Texture compression failed: %s", result.error().c_str());
             for (unsigned layer = 0; layer < active_batch_size; ++layer) {
                 accumulate_quality(accumulator,
                     reconstruct(state, layer),
@@ -856,20 +858,21 @@ private:
 
 int main(int argc, char* argv[])
 {
-    QGuiApplication application(argc, argv);
-    QCoreApplication::setApplicationName(QStringLiteral("TextureCompressionBenchmark"));
-    QCoreApplication::setOrganizationName(QStringLiteral("AlpineMaps.org"));
-
     QSurfaceFormat format;
     format.setDepthBufferSize(24);
     format.setOption(QSurfaceFormat::DebugContext);
-    if (QOpenGLContext::openGLModuleType() == QOpenGLContext::LibGL) {
-        format.setVersion(3, 3);
-        format.setProfile(QSurfaceFormat::CoreProfile);
-    } else {
-        format.setVersion(3, 0);
-    }
+#if QT_CONFIG(opengles2)
+    format.setVersion(3, 0);
+#else
+    format.setRenderableType(QSurfaceFormat::OpenGL);
+    format.setVersion(3, 3);
+    format.setProfile(QSurfaceFormat::CoreProfile);
+#endif
     QSurfaceFormat::setDefaultFormat(format);
+
+    QGuiApplication application(argc, argv);
+    QCoreApplication::setApplicationName(QStringLiteral("TextureCompressionBenchmark"));
+    QCoreApplication::setOrganizationName(QStringLiteral("AlpineMaps.org"));
 
     BenchmarkWindow window;
     window.show();

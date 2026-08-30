@@ -17,13 +17,13 @@ int main(int argc, char** argv)
     QQuickWindow::setGraphicsApi(QSGRendererInterface::GraphicsApi::OpenGLRhi);
 
     QSurfaceFormat format;
-    if (QOpenGLContext::openGLModuleType() == QOpenGLContext::LibGL) {
-        format.setRenderableType(QSurfaceFormat::OpenGL);
-        format.setVersion(3, 3);
-        format.setProfile(QSurfaceFormat::CoreProfile);
-    } else {
-        format.setVersion(3, 0);
-    }
+#if QT_CONFIG(opengles2)
+    format.setVersion(3, 0);
+#else
+    format.setRenderableType(QSurfaceFormat::OpenGL);
+    format.setVersion(3, 3);
+    format.setProfile(QSurfaceFormat::CoreProfile);
+#endif
     QSurfaceFormat::setDefaultFormat(format);
 
     QGuiApplication application(argc, argv);

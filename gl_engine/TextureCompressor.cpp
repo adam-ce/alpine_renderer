@@ -113,12 +113,11 @@ gl_engine::TextureCompressor::TextureCompressor(std::weak_ptr<Texture> scratch,
 
 gl_engine::TextureCompressor::~TextureCompressor()
 {
+    Q_ASSERT(QOpenGLContext::currentContext());
     m_program.reset();
     m_encoding_framebuffer.reset();
     m_copy_framebuffer.reset();
     m_screen_quad.reset();
-    if (!QOpenGLContext::currentContext())
-        return;
     auto* f = QOpenGLContext::currentContext()->extraFunctions();
     f->glDeleteBuffers(1, &m_encoded_buffer);
 }

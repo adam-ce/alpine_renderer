@@ -71,11 +71,11 @@ public:
     TextureCompressor(std::weak_ptr<Texture> scratch,
         std::weak_ptr<Texture> destination,
         Settings settings);
-    ~TextureCompressor();
     TextureCompressor(const TextureCompressor&) = delete;
-    TextureCompressor(TextureCompressor&&) = delete;
     TextureCompressor& operator=(const TextureCompressor&) = delete;
+    TextureCompressor(TextureCompressor&&) = delete;
     TextureCompressor& operator=(TextureCompressor&&) = delete;
+    ~TextureCompressor();
 
     [[nodiscard]] std::expected<Result, std::string> compress(std::span<const unsigned> destination_layers);
 
