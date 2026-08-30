@@ -114,13 +114,12 @@ gl_engine::TextureCompressor::TextureCompressor(std::weak_ptr<Texture> scratch,
 gl_engine::TextureCompressor::~TextureCompressor()
 {
     m_program.reset();
+    m_encoding_framebuffer.reset();
     m_copy_framebuffer.reset();
     m_screen_quad.reset();
     if (!QOpenGLContext::currentContext())
         return;
     auto* f = QOpenGLContext::currentContext()->extraFunctions();
-    f->glDeleteFramebuffers(1, &m_encoding_framebuffer);
-    f->glDeleteTextures(1, &m_encoded_texture);
     f->glDeleteBuffers(1, &m_encoded_buffer);
 }
 
@@ -179,21 +178,18 @@ std::optional<std::string> gl_engine::TextureCompressor::initialise()
         if (m_atlas_width <= 0 || m_atlas_height <= 0 || m_atlas_height > maximum_texture_size)
             return "Texture compression output atlas exceeds the maximum texture size";
 
-        const auto internal_format = mode == ReadbackMode::RG32UI ? GL_RG32UI : GL_RGBA32UI;
-        f->glGenTextures(1, &m_encoded_texture);
-        f->glBindTexture(GL_TEXTURE_2D, m_encoded_texture);
-        f->glTexStorage2D(GL_TEXTURE_2D, 1, internal_format, m_atlas_width, m_atlas_height);
-        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        f->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        f->glGenFramebuffers(1, &m_encoding_framebuffer);
-        f->glBindFramebuffer(GL_FRAMEBUFFER, m_encoding_framebuffer);
-        f->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_encoded_texture, 0);
-        const auto framebuffer_status = f->glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        const auto colour_format = mode == ReadbackMode::RG32UI
+            ? Framebuffer::ColourFormat::RG32UI
+            : Framebuffer::ColourFormat::RGBA32UI;
+        auto candidate = std::make_unique<Framebuffer>(Framebuffer::DepthFormat::None,
+            std::vector { colour_format },
+            glm::uvec2 { unsigned(m_atlas_width), unsigned(m_atlas_height) });
+        candidate->bind_for_reading();
+        const auto framebuffer_status = f->glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
         if (framebuffer_status != GL_FRAMEBUFFER_COMPLETE)
-            return "Texture compression framebuffer is incomplete";
+            return mode == ReadbackMode::RG32UI
+                ? "RG32UI texture compression framebuffer is incomplete"
+                : "RGBA32UI texture compression framebuffer is incomplete";
 
         if (mode == ReadbackMode::RG32UI) {
             GLint implementation_read_format = 0;
@@ -204,6 +200,7 @@ std::optional<std::string> gl_engine::TextureCompressor::initialise()
             if (implementation_read_format != GL_RG_INTEGER || implementation_read_type != GL_UNSIGNED_INT)
                 return "RG32UI framebuffer readback is unavailable";
         }
+        m_encoding_framebuffer = std::move(candidate);
         return std::nullopt;
     };
 
@@ -218,10 +215,6 @@ std::optional<std::string> gl_engine::TextureCompressor::initialise()
     auto selected_mode = requested_mode == ReadbackMode::RGBA32UI ? ReadbackMode::RGBA32UI : ReadbackMode::RG32UI;
     auto output_error = create_output(selected_mode);
     if (output_error && requested_mode == ReadbackMode::Auto) {
-        f->glDeleteFramebuffers(1, &m_encoding_framebuffer);
-        f->glDeleteTextures(1, &m_encoded_texture);
-        m_encoding_framebuffer = 0;
-        m_encoded_texture = 0;
         selected_mode = ReadbackMode::RGBA32UI;
         output_error = create_output(selected_mode);
         if (!output_error)
@@ -361,7 +354,7 @@ std::expected<gl_engine::TextureCompressor::Result, std::string> gl_engine::Text
     const auto encoding_width = GLsizei(std::min(encoding_pixels, size_t(m_atlas_width)));
     const auto encoding_height = GLsizei((encoding_pixels + size_t(encoding_width) - 1) / size_t(encoding_width));
 
-    f->glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_encoding_framebuffer);
+    m_encoding_framebuffer->bind_for_drawing();
     f->glViewport(0, 0, encoding_width, encoding_height);
     m_program->bind();
     m_program->set_uniform("source_texture", 7);
@@ -386,7 +379,7 @@ std::expected<gl_engine::TextureCompressor::Result, std::string> gl_engine::Text
     f->glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_framebuffer);
     f->glGetIntegerv(GL_READ_BUFFER, &previous_read_buffer);
     f->glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack_alignment);
-    f->glBindFramebuffer(GL_READ_FRAMEBUFFER, m_encoding_framebuffer);
+    m_encoding_framebuffer->bind_for_reading();
     f->glReadBuffer(GL_COLOR_ATTACHMENT0);
     f->glPixelStorei(GL_PACK_ALIGNMENT, 1);
     f->glBindBuffer(GL_PIXEL_PACK_BUFFER, m_encoded_buffer);

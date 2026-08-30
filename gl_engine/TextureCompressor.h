@@ -111,11 +111,10 @@ private:
     unsigned m_mip_levels = 0;
     GLsizei m_atlas_width = 0;
     GLsizei m_atlas_height = 0;
-    GLuint m_encoded_texture = 0;
     GLuint m_encoded_buffer = 0;
-    GLuint m_encoding_framebuffer = 0;
 
     std::unique_ptr<ShaderProgram> m_program;
+    std::unique_ptr<Framebuffer> m_encoding_framebuffer;
     std::unique_ptr<Framebuffer> m_copy_framebuffer;
     std::unique_ptr<helpers::ScreenQuadGeometry> m_screen_quad;
 };

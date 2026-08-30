@@ -184,10 +184,61 @@ TEST_CASE("GPU texture compression supports automatic and explicit readback mode
     const auto direct_result = direct.compress(layers);
     if (direct_result) {
         CHECK(direct.effective_readback_mode() == Compressor::ReadbackMode::RG32UI);
+        CHECK(automatic.effective_readback_mode() == Compressor::ReadbackMode::RG32UI);
         CHECK(reconstruct_srgb(*auto_output, resolution, 0) == reconstruct_srgb(*direct_output, resolution, 0));
     } else {
         CHECK(direct_result.error().find("RG32UI") != std::string::npos);
+        CHECK(automatic.effective_readback_mode() == Compressor::ReadbackMode::RGBA32UI);
     }
+}
+
+TEST_CASE("GPU texture compressor is reusable and preserves framebuffer bindings")
+{
+    constexpr unsigned resolution = 16;
+    const std::vector<Raster> sources { test_raster(resolution) };
+    auto scratch = rgba_scratch(sources, 1);
+    auto output = destination(gl_engine::Texture::Format::CompressedRGBA8, resolution, 2, 1);
+
+    auto* f = QOpenGLContext::currentContext()->extraFunctions();
+    std::array<GLint, 4> expected_viewport {};
+    f->glGetIntegerv(GL_VIEWPORT, expected_viewport.data());
+    Compressor compressor(scratch, output, { .readback_mode = Compressor::ReadbackMode::RGBA32UI });
+    std::array<GLint, 4> actual_viewport {};
+    f->glGetIntegerv(GL_VIEWPORT, actual_viewport.data());
+    CHECK(actual_viewport == expected_viewport);
+
+    const std::array<unsigned, 1> first_layer { 0 };
+    const std::array<unsigned, 1> second_layer { 1 };
+
+    gl_engine::Framebuffer draw_framebuffer(
+        gl_engine::Framebuffer::DepthFormat::None, { gl_engine::Framebuffer::ColourFormat::RGBA8 });
+    gl_engine::Framebuffer read_framebuffer(
+        gl_engine::Framebuffer::DepthFormat::None, { gl_engine::Framebuffer::ColourFormat::RGBA8 });
+    draw_framebuffer.bind_for_drawing();
+    read_framebuffer.bind_for_reading();
+
+    GLint expected_draw_framebuffer = 0;
+    GLint expected_read_framebuffer = 0;
+    f->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &expected_draw_framebuffer);
+    f->glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &expected_read_framebuffer);
+    REQUIRE(expected_draw_framebuffer != expected_read_framebuffer);
+
+    const auto first_result = compressor.compress(first_layer);
+    REQUIRE(first_result);
+    const auto second_result = compressor.compress(second_layer);
+    REQUIRE(second_result);
+    CHECK(second_result->bytes_written == first_result->bytes_written);
+    CHECK(second_result->layers_written == 1);
+    CHECK(second_result->mip_levels_written == 1);
+
+    GLint actual_draw_framebuffer = 0;
+    GLint actual_read_framebuffer = 0;
+    f->glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &actual_draw_framebuffer);
+    f->glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &actual_read_framebuffer);
+    CHECK(actual_draw_framebuffer == expected_draw_framebuffer);
+    CHECK(actual_read_framebuffer == expected_read_framebuffer);
+    gl_engine::Framebuffer::unbind();
+    CHECK(psnr(reconstruct_srgb(*output, resolution, 1), sources.front()) > 10.0);
 }
 
 TEST_CASE("GPU texture compressor exposes every platform algorithm")
